@@ -4,6 +4,7 @@
 #include "../Source/WavetableEngine.h"
 #include "../Source/WavetableExporter.h"
 #include "../Source/VitalBridge.h"
+#include "../Source/SerumBridge.h"
 
 using namespace wtm;
 
@@ -294,6 +295,45 @@ int main (int argc, char** argv)
         juce::FileOutputStream fo (outDir.getChildFile ("audio_table_frames.f32"));
         fo.setPosition (0); fo.truncate();
         for (int i : { 0, 64, 128, 192, 256 }) fo.write (shown[(size_t) i].data(), kFrameSize * sizeof (float));
+    }
+
+    // Optional: argv[4] = a real Serum 2 preset (same format as its plugin state)
+    if (argc > 4)
+    {
+        juce::MemoryBlock preset;
+        juce::File (argv[4]).loadFileAsData (preset);
+        juce::String path; int samples = 0;
+        check (serum::getOscillatorWavetable (preset, 0, path, samples).wasOk(), "REAL Serum: read osc A table: " + path + " / " + juce::String (samples));
+
+        juce::MemoryBlock out;
+        const auto r = serum::setOscillatorWavetable (preset, 0, "Wavetable Morpher/Live/Test Morph 7.wav", 256 * 2048, out);
+        check (r.wasOk(), "REAL Serum: point osc A at our table " + r.getErrorMessage());
+        juce::String p2; int s2 = 0;
+        check (serum::getOscillatorWavetable (out, 0, p2, s2).wasOk() && p2 == "Wavetable Morpher/Live/Test Morph 7.wav" && s2 == 256 * 2048,
+               "REAL Serum: read back new path + frame count");
+        juce::String p3; int s3 = 0;
+        serum::getOscillatorWavetable (out, 1, p3, s3);
+        juce::String p1; int s1 = 0;
+        serum::getOscillatorWavetable (preset, 1, p1, s1);
+        check (p3 == p1 && s3 == s1, "REAL Serum: osc B untouched (" + p3 + ")");
+        outDir.getChildFile ("serum_out.bin").replaceWithData (out.getData(), out.getSize());
+
+        // Same, wrapped the way a VST3 host returns it
+        juce::XmlElement xml ("VST3PluginState");
+        xml.createNewChildElement ("IComponent")->addTextElement (preset.toBase64Encoding());
+        juce::MemoryBlock host;
+        {
+            juce::MemoryOutputStream o (host, false);
+            o.writeInt (0x21324356); o.writeInt (0);
+            xml.writeTo (o, juce::XmlElement::TextFormat().singleLine());
+            o.writeByte (0);
+        }
+        const auto len = (juce::uint32) host.getSize() - 9;
+        std::memcpy (static_cast<char*> (host.getData()) + 4, &len, 4);
+        juce::MemoryBlock hostOut;
+        check (serum::setOscillatorWavetable (host, 2, "X/y.wav", 4096, hostOut).wasOk(), "REAL Serum inside host envelope: osc C");
+        juce::String pc; int sc = 0;
+        check (serum::getOscillatorWavetable (hostOut, 2, pc, sc).wasOk() && pc == "X/y.wav" && sc == 4096, "REAL Serum inside host envelope: read back");
     }
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " FAILURES") << std::endl;

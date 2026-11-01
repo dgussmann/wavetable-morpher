@@ -1,68 +1,15 @@
 #include "VitalBridge.h"
+#include "PluginState.h"
 
 namespace wtm::vital
 {
+    using wtm::state::HostEnvelope;
+    using wtm::state::unwrapHost;
+    using wtm::state::rewrapHost;
+    using wtm::state::fixRemainingSizeFields;
+
     namespace
     {
-        constexpr juce::uint32 kHostXmlMagic = 0x21324356; // "VC2!" written by juce::AudioProcessor::copyXmlToBinary
-
-        //==============================================================================
-        /** Layer 1: the JUCE VST3 host's XML envelope. */
-        struct HostEnvelope
-        {
-            std::unique_ptr<juce::XmlElement> xml;   // null when the state wasn't wrapped
-            juce::MemoryBlock component;             // the plugin's own (IComponent) state
-        };
-
-        void unwrapHost (const juce::MemoryBlock& in, HostEnvelope& out)
-        {
-            const auto* bytes = static_cast<const char*> (in.getData());
-            const auto size = in.getSize();
-
-            if (size > 8 && juce::ByteOrder::littleEndianInt (bytes) == kHostXmlMagic)
-            {
-                const auto length = (int) juce::ByteOrder::littleEndianInt (bytes + 4);
-                const auto text = juce::String::fromUTF8 (bytes + 8, juce::jmin ((int) size - 8, length));
-
-                if (auto xml = juce::parseXML (text); xml != nullptr && xml->getChildByName ("IComponent") != nullptr)
-                {
-                    juce::MemoryBlock component;
-                    if (component.fromBase64Encoding (xml->getChildByName ("IComponent")->getAllSubText()))
-                    {
-                        out.xml = std::move (xml);
-                        out.component = std::move (component);
-                        return;
-                    }
-                }
-            }
-
-            out.xml.reset();
-            out.component = in;
-        }
-
-        juce::MemoryBlock rewrapHost (const HostEnvelope& env, const juce::MemoryBlock& component)
-        {
-            if (env.xml == nullptr)
-                return component;
-
-            auto* child = env.xml->getChildByName ("IComponent");
-            child->deleteAllTextElements();
-            child->addTextElement (component.toBase64Encoding());
-
-            // Same layout as juce::AudioProcessor::copyXmlToBinary
-            juce::MemoryBlock out;
-            {
-                juce::MemoryOutputStream stream (out, false);
-                stream.writeInt ((int) kHostXmlMagic);
-                stream.writeInt (0);
-                env.xml->writeTo (stream, juce::XmlElement::TextFormat().singleLine());
-                stream.writeByte (0);
-            }
-            const auto length = juce::ByteOrder::swapIfBigEndian ((juce::uint32) out.getSize() - 9);
-            std::memcpy (static_cast<char*> (out.getData()) + 4, &length, 4);
-            return out;
-        }
-
         //==============================================================================
         /** Layer 2: whatever Vital's own wrapper puts around the JSON. We keep the bytes before and after
             the JSON exactly, only fixing "bytes remaining" size fields in the header. */
@@ -138,28 +85,8 @@ namespace wtm::vital
             const auto delta = newJsonSize - oldJsonSize;
             const auto oldTotal = (juce::int64) parsed.envelope.component.getSize();
 
-            // Header fields like VST2 "CcnK" byteSize / chunkSize hold "bytes remaining after this field".
             juce::MemoryBlock prefix (parsed.prefix);
-            auto* p = static_cast<unsigned char*> (prefix.getData());
-            for (size_t o = 0; o + 4 <= prefix.getSize(); ++o)
-            {
-                const auto remaining = oldTotal - (juce::int64) (o + 4);
-                const auto be = (juce::int64) juce::ByteOrder::bigEndianInt (p + o);
-                const auto le = (juce::int64) juce::ByteOrder::littleEndianInt (p + o);
-
-                if (be == remaining && remaining > 16)
-                {
-                    const auto v = juce::ByteOrder::swapIfLittleEndian ((juce::uint32) (be + delta));
-                    std::memcpy (p + o, &v, 4);
-                    o += 3;
-                }
-                else if (le == remaining && remaining > 16)
-                {
-                    const auto v = juce::ByteOrder::swapIfBigEndian ((juce::uint32) (le + delta));
-                    std::memcpy (p + o, &v, 4);
-                    o += 3;
-                }
-            }
+            fixRemainingSizeFields (prefix, oldTotal, delta);
 
             juce::MemoryBlock component;
             component.append (prefix.getData(), prefix.getSize());
@@ -289,7 +216,7 @@ namespace wtm::vital
 
     //==============================================================================
     juce::Result injectWavetable (const juce::MemoryBlock& state, const std::vector<Cycle>& frames,
-                                  int osc, const juce::String& tableName, juce::MemoryBlock& newState)
+                                  int osc, const juce::String& tableName, juce::MemoryBlock& newState, bool soloOsc)
     {
         if (frames.empty())
             return juce::Result::fail ("There's no wavetable to send yet.");
@@ -343,7 +270,16 @@ namespace wtm::vital
         tables->set (osc, table);
 
         if (auto* settings = parsed.root["settings"].getDynamicObject())
+        {
             settings->setProperty ("osc_" + juce::String (osc + 1) + "_on", 1.0);
+            if (soloOsc)
+            {
+                for (int i = 0; i < 3; ++i)
+                    if (i != osc)
+                        settings->setProperty ("osc_" + juce::String (i + 1) + "_on", 0.0);
+                settings->setProperty ("sample_on", 0.0);
+            }
+        }
 
         newState = rebuildState (parsed, juce::JSON::toString (parsed.root, true));
         return juce::Result::ok();

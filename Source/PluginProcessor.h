@@ -9,6 +9,7 @@
 #include "WavetableEngine.h"
 #include "WavetableExporter.h"
 #include "VitalBridge.h"
+#include "SerumBridge.h"
 
 namespace ParamIDs
 {
@@ -135,9 +136,18 @@ public:
     juce::File getHostedSynthFile() const { return hostedFile; }
     juce::String getHostedSynthName() const { return hosted != nullptr ? hosted->getName() : juce::String(); }
     bool isHostedVital() const noexcept { return hostedIsVital; }
+    bool isHostedSerum() const noexcept { return hostedIsSerum; }
+    /** Vital and Serum 2 can be given our wavetable automatically. */
+    bool canSendToSynth() const noexcept { return hostedIsVital || hostedIsSerum; }
+    juce::String getHostedShortName() const { return hostedIsVital ? "Vital" : hostedIsSerum ? "Serum 2" : getHostedSynthName(); }
+    juce::String oscillatorLabel (int i) const { return hostedIsSerum ? juce::String::charToString ((juce::juce_wchar) ('A' + i)) : juce::String (i + 1); }
+
+    /** Silence the synth's other oscillators (and noise/sub/sample) so only our table is heard. */
+    bool getSolo() const noexcept { return solo; }
+    void setSolo (bool s) { solo = s; lastSentVersion = -1; }
 
     /** Puts the current morph into the chosen oscillator of the loaded Vital. */
-    juce::Result sendToVital();
+    juce::Result sendToSynth();
     int getVitalOscillator() const noexcept { return vitalOsc; }
     void setVitalOscillator (int i) { vitalOsc = juce::jlimit (0, 2, i); lastSentVersion = -1; findHostedFrameParam(); }
     bool getAutoSend() const noexcept { return autoSend; }
@@ -215,7 +225,12 @@ private:
     juce::AudioPluginFormatManager formatManager;
     std::unique_ptr<juce::AudioPluginInstance> hosted;
     juce::File hostedFile;
-    bool hostedIsVital = false;
+    bool hostedIsVital = false, hostedIsSerum = false;
+    bool solo = true;
+    int serumSendCounter = 0;
+    juce::Result sendToVitalNow (const std::vector<wtm::Cycle>& frames);
+    juce::Result sendToSerumNow (const std::vector<wtm::Cycle>& frames);
+    void applySerumSolo();
     std::atomic<bool> hostedActive { false };
     juce::CriticalSection hostLock;      // audio thread vs. swapping / Vital updates
     juce::CriticalSection lifetimeLock;  // state saving vs. unloading
@@ -225,7 +240,7 @@ private:
     int loadGeneration = 0;
 
     // Vital auto-send
-    int vitalOsc = 1; // send to Vital's osc 2 by default, so osc 1 stays free for browsing Vital's own tables
+    int vitalOsc = 0; // which synth oscillator receives our table (Vital 1-3, Serum A-C)
     bool autoSend = true;
     std::atomic<int> tableVersion { 0 };
     int lastSentVersion = -1;

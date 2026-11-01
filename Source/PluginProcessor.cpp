@@ -266,11 +266,11 @@ void WavetableMorpherProcessor::timerCallback()
     }
 
     // Vital auto-send: once the morph has settled for a moment and no notes are held.
-    if (autoSend && hostedIsVital && hosted != nullptr && lastSentVersion != tableVersion.load()
+    if (autoSend && canSendToSynth() && hosted != nullptr && lastSentVersion != tableVersion.load()
         && heldNotes.load() == 0
         && juce::Time::getMillisecondCounterHiRes() - lastTableChangeMs.load() > 250.0)
     {
-        const auto r = sendToVital();
+        const auto r = sendToSynth();
         if (onVitalSent)
             onVitalSent (r.wasOk() ? juce::String() : r.getErrorMessage());
     }
@@ -389,6 +389,12 @@ void WavetableMorpherProcessor::findHostedFrameParam()
         const auto n = params[i]->getName (64).toLowerCase();
         // Vital: "Oscillator 2 Frame" / "Osc 2 Wave Frame"...
         if (hostedIsVital && n.contains ("osc") && n.contains (osc) && n.contains ("frame"))
+        {
+            hostedFrameParam = i;
+            return;
+        }
+        // Serum 2: "A WT Pos"
+        if (hostedIsSerum && n == oscillatorLabel (vitalOsc).toLowerCase() + " wt pos")
         {
             hostedFrameParam = i;
             return;
@@ -602,6 +608,7 @@ void WavetableMorpherProcessor::getStateInformation (juce::MemoryBlock& destData
     {
         juce::ValueTree host ("HOST");
         host.setProperty ("vitalOsc", vitalOsc, nullptr);
+        host.setProperty ("solo", solo, nullptr);
         host.setProperty ("autoSend", autoSend, nullptr);
         host.setProperty ("playSource", (int) playSource, nullptr);
 
@@ -638,7 +645,8 @@ void WavetableMorpherProcessor::setStateInformation (const void* data, int sizeI
 
     if (host.isValid())
     {
-        vitalOsc = juce::jlimit (0, 2, (int) host.getProperty ("vitalOsc", 1));
+        vitalOsc = juce::jlimit (0, 2, (int) host.getProperty ("vitalOsc", 0));
+        solo = (bool) host.getProperty ("solo", true);
         autoSend = (bool) host.getProperty ("autoSend", true);
         playSource = (PlaySource) juce::jlimit (0, 2, (int) host.getProperty ("playSource", 1));
 
@@ -790,6 +798,8 @@ void WavetableMorpherProcessor::loadHostedSynth (const juce::File& bundle, std::
                 const juce::ScopedLock l2 (self->hostLock);
                 self->hosted = std::move (instance);
                 self->hostedFile = bundle;
+                self->hostedIsSerum = description.name.containsIgnoreCase ("Serum 2")
+                                      || (description.manufacturerName.containsIgnoreCase ("Xfer") && description.name.containsIgnoreCase ("Serum"));
                 self->hostedIsVital = description.name.trim().equalsIgnoreCase ("Vital")
                                       || description.manufacturerName.containsIgnoreCase ("Vital Audio")
                                       || description.manufacturerName.containsIgnoreCase ("Matt Tytel");
@@ -797,7 +807,7 @@ void WavetableMorpherProcessor::loadHostedSynth (const juce::File& bundle, std::
                 self->hostedActive = true;
             }
 
-            self->lastSentVersion = restore != nullptr ? self->tableVersion.load() : -1;
+            self->lastSentVersion = -1; // (re)send our table once it's loaded
             self->heldNotes = 0;
             self->synthTable.clear();
             self->synthTableName.clear();
@@ -826,6 +836,7 @@ void WavetableMorpherProcessor::unloadHostedSynth()
         old = std::move (hosted);
         hostedFile = juce::File();
         hostedIsVital = false;
+        hostedIsSerum = false;
         hostedFrameParam = -1;
         setLatencySamples (0);
     }
@@ -840,21 +851,68 @@ void WavetableMorpherProcessor::unloadHostedSynth()
     sendChangeMessage();
 }
 
-juce::Result WavetableMorpherProcessor::sendToVital()
+juce::Result WavetableMorpherProcessor::sendToSynth()
 {
-    if (hosted == nullptr || ! hostedIsVital)
-        return juce::Result::fail ("Load Vital first.");
+    if (hosted == nullptr || ! canSendToSynth())
+        return juce::Result::fail ("Load Vital or Serum 2 first.");
 
     const int version = tableVersion.load();
     const auto frames = getPlayFrames();
+    if (frames.empty())
+        return juce::Result::fail ("There's no wavetable to send yet.");
+
+    const auto r = hostedIsVital ? sendToVitalNow (frames) : sendToSerumNow (frames);
+    if (r.failed())
+        return r;
+
+    lastSentVersion = version;
+    pollSynthTable (true);
+    return juce::Result::ok();
+}
+
+juce::Result WavetableMorpherProcessor::sendToVitalNow (const std::vector<wtm::Cycle>& frames)
+{
+    juce::MemoryBlock current, updated;
+    hosted->getStateInformation (current);
+
+    auto r = wtm::vital::injectWavetable (current, frames, vitalOsc, getPlayName(), updated, solo);
+    if (r.failed())
+    {
+        saveDiagnostic (current, "vital-send-error");
+        return r;
+    }
+
+    const juce::ScopedLock sl (hostLock);
+    hosted->setStateInformation (updated.getData(), (int) updated.getSize());
+    return juce::Result::ok();
+}
+
+juce::Result WavetableMorpherProcessor::sendToSerumNow (const std::vector<wtm::Cycle>& frames)
+{
+    // Serum's patches reference tables in its Tables folder, so put ours there and point the oscillator at it.
+    const auto tables = wtm::detectBrowseFolder (wtm::Destination::Serum2);
+    if (! tables.isDirectory())
+        return juce::Result::fail ("Couldn't find Serum 2's Tables folder (in Serum: Menu > Show Serum Presets Folder > Tables).");
+
+    const auto live = tables.getChildFile ("Wavetable Morpher").getChildFile ("Live");
+    if (! live.isDirectory() && live.createDirectory().failed())
+        return juce::Result::fail ("Couldn't create " + live.getFullPathName() + " - check that you can write to Serum's Tables folder.");
+
+    // A new file name each time, so Serum can't reuse a cached copy of an older version.
+    const auto base = juce::File::createLegalFileName (getPlayName().trim().isNotEmpty() ? getPlayName().trim() : juce::String ("Morph"));
+    const auto file = live.getChildFile (base + " " + juce::String (++serumSendCounter) + "-" + juce::String (juce::Random::getSystemRandom().nextInt (10000)) + ".wav");
+    auto r = wtm::writeWavetableWav (file, frames);
+    if (r.failed())
+        return r;
 
     juce::MemoryBlock current, updated;
     hosted->getStateInformation (current);
 
-    auto r = wtm::vital::injectWavetable (current, frames, vitalOsc, getPlayName(), updated);
+    r = wtm::serum::setOscillatorWavetable (current, vitalOsc, "Wavetable Morpher/Live/" + file.getFileName(),
+                                            (int) frames.size() * wtm::kFrameSize, updated);
     if (r.failed())
     {
-        saveDiagnostic (current, "vital-send-error");
+        saveDiagnostic (current, "serum-send-error");
         return r;
     }
 
@@ -863,9 +921,36 @@ juce::Result WavetableMorpherProcessor::sendToVital()
         hosted->setStateInformation (updated.getData(), (int) updated.getSize());
     }
 
-    lastSentVersion = version;
-    pollSynthTable (true);
+    if (solo)
+        applySerumSolo();
+
+    // Tidy up: keep the 20 newest live files (older ones may still be referenced by an open Serum window).
+    auto old = live.findChildFiles (juce::File::findFiles, false, "*.wav");
+    struct Newest { static int compareElements (const juce::File& a, const juce::File& b)
+        { return a.getLastModificationTime() > b.getLastModificationTime() ? -1 : 1; } } order;
+    old.sort (order);
+    for (int i = 20; i < old.size(); ++i)
+        old.getReference (i).deleteFile();
+
     return juce::Result::ok();
+}
+
+void WavetableMorpherProcessor::applySerumSolo()
+{
+    const auto target = oscillatorLabel (vitalOsc);
+    for (auto* p : hosted->getParameters())
+    {
+        const auto name = p->getName (64).trim();
+        float value = -1.0f;
+        for (auto osc : { "A", "B", "C" })
+            if (name.equalsIgnoreCase (juce::String (osc) + " Enable"))
+                value = target == osc ? 1.0f : 0.0f;
+        if (name.equalsIgnoreCase ("Noise Enable") || name.equalsIgnoreCase ("Sub Enable"))
+            value = 0.0f;
+
+        if (value >= 0.0f && std::abs (p->getValue() - value) > 0.001f)
+            p->setValueNotifyingHost (value);
+    }
 }
 
 void WavetableMorpherProcessor::pollSynthTable (bool force)
@@ -875,11 +960,11 @@ void WavetableMorpherProcessor::pollSynthTable (bool force)
     if (hosted == nullptr)
         return;
 
-    if (! hostedIsVital)
+    if (! canSendToSynth())
     {
         if (synthTableNote.isEmpty())
         {
-            synthTableNote = hosted->getName() + " keeps its wavetables in a closed format, so its oscillator can't be shown here (only Vital's can).";
+            synthTableNote = hosted->getName() + "'s oscillators can't be read - only Vital's and Serum 2's can.";
             sendChangeMessage();
         }
         return;
@@ -887,6 +972,37 @@ void WavetableMorpherProcessor::pollSynthTable (bool force)
 
     juce::MemoryBlock state;
     hosted->getStateInformation (state);
+
+    if (hostedIsSerum)
+    {
+        juce::String path; int samples = 0;
+        const auto r = wtm::serum::getOscillatorWavetable (state, 0, path, samples);
+        const auto fingerprint = (path + "|" + juce::String (samples)).hashCode64();
+        if (! force && fingerprint == synthFingerprint)
+            return;
+        synthFingerprint = fingerprint;
+
+        synthTable.clear();
+        synthTableName = path.fromLastOccurrenceOf ("/", false, false).upToLastOccurrenceOf (".", false, false);
+        synthTableNote.clear();
+
+        if (r.failed())
+        {
+            saveDiagnostic (state, "serum-read-error");
+            synthTableNote = r.getErrorMessage();
+        }
+        else
+        {
+            const auto file = wtm::detectBrowseFolder (wtm::Destination::Serum2).getChildFile (path.trimCharactersAtStart ("/"));
+            wtm::ImportedAudio audio;
+            if (file.existsAsFile() && wtm::importAudioFile (file, audio).wasOk())
+                synthTable = std::move (audio.frames);
+            else
+                synthTableNote = "Serum's oscillator A uses \"" + path + "\", which couldn't be opened from its Tables folder.";
+        }
+        sendChangeMessage();
+        return;
+    }
 
     const auto fingerprint = wtm::vital::wavetableFingerprint (state, 0);
     if (! force && fingerprint == synthFingerprint)
@@ -920,7 +1036,7 @@ void WavetableMorpherProcessor::useSynthTable (int slotIndex, int frameIndex)
 
     auto& s = slots[(size_t) juce::jlimit (0, 1, slotIndex)];
     s.kind = SourceSlot::Kind::Imported;
-    s.importedName = "Vital: " + (synthTableName.isNotEmpty() ? synthTableName : juce::String ("Osc 1"));
+    s.importedName = getHostedShortName() + ": " + (synthTableName.isNotEmpty() ? synthTableName : juce::String ("Osc 1"));
     s.importedFile = juce::File();
     s.importedFrames = synthTable;
     for (auto& f : s.importedFrames) { wtm::removeDC (f); wtm::normalise (f); }

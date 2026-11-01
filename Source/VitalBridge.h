@@ -21,7 +21,8 @@ namespace wtm::vital
                                   const std::vector<Cycle>& frames,
                                   int oscillatorIndex,          // 0, 1 or 2
                                   const juce::String& tableName,
-                                  juce::MemoryBlock& newState);
+                                  juce::MemoryBlock& newState,
+                                  bool soloThisOscillator = false); // also switch off the other oscillators and the sample
 
     /** Raw keyframes of one oscillator (for tests). */
     juce::Result readWavetable (const juce::MemoryBlock& state, int oscillatorIndex,

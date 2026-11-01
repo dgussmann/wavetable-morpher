@@ -18,6 +18,21 @@ FetchContent_Declare(JUCE
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(JUCE)
 
+# zstd: Serum 2 compresses its patch data with it
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.6
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake)
+FetchContent_MakeAvailable(zstd)
+set_target_properties(libzstd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 juce_add_plugin(WavetableMorpher
     PRODUCT_NAME "Wavetable Morpher"
     COMPANY_NAME "dgussmann"
@@ -38,7 +53,9 @@ set(WTM_CORE_SOURCES
     Source/WaveSources.cpp
     Source/WavetableEngine.cpp
     Source/WavetableExporter.cpp
-    Source/VitalBridge.cpp)
+    Source/VitalBridge.cpp
+    Source/SerumBridge.cpp
+    Source/PluginState.cpp)
 
 target_sources(WavetableMorpher PRIVATE
     ${WTM_CORE_SOURCES}
@@ -53,9 +70,12 @@ target_compile_definitions(WavetableMorpher PUBLIC
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0)
 
+target_include_directories(WavetableMorpher PRIVATE ${zstd_SOURCE_DIR}/lib)
 target_link_libraries(WavetableMorpher
     PRIVATE
         juce::juce_audio_utils
+        juce::juce_cryptography
+        libzstd_static
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -65,6 +85,7 @@ if(WTM_BUILD_TESTS)
     juce_add_console_app(WavetableMorpherTests PRODUCT_NAME "WavetableMorpherTests")
     target_sources(WavetableMorpherTests PRIVATE Tests/SelfTest.cpp ${WTM_CORE_SOURCES})
     target_compile_definitions(WavetableMorpherTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
-    target_link_libraries(WavetableMorpherTests PRIVATE juce::juce_audio_formats
+    target_include_directories(WavetableMorpherTests PRIVATE ${zstd_SOURCE_DIR}/lib)
+    target_link_libraries(WavetableMorpherTests PRIVATE juce::juce_audio_formats juce::juce_cryptography libzstd_static
         PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 endif()

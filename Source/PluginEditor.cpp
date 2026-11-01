@@ -515,11 +515,11 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     openSynthButton.onClick = [this] { openSynthWindow(); };
     addAndMakeVisible (openSynthButton);
 
-    sendButton.setTooltip ("Put the current morph into Vital's oscillator now");
+    sendButton.setTooltip ("Load the playing wavetable into the synth's oscillator now");
     sendButton.onClick = [this]
     {
-        const auto r = proc.sendToVital();
-        setStatus (r.wasOk() ? "Sent \"" + proc.getTableName() + "\" to Vital oscillator " + juce::String (proc.getVitalOscillator() + 1) + "."
+        const auto r = proc.sendToSynth();
+        setStatus (r.wasOk() ? "Sent \"" + proc.getPlayName() + "\" to " + proc.getHostedShortName() + " oscillator " + proc.oscillatorLabel (proc.getVitalOscillator()) + "."
                              : r.getErrorMessage(), r.failed());
         refreshSynthControls();
     };
@@ -530,7 +530,11 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     addAndMakeVisible (autoSendToggle);
 
     oscBox.addItemList ({ "Osc 1", "Osc 2", "Osc 3" }, 1);
-    oscBox.setTooltip ("Which Vital oscillator receives the wavetable");
+    oscBox.setTooltip ("Which of the synth's oscillators plays the wavetable");
+
+    soloToggle.setTooltip ("Switch off the synth's other oscillators (and noise / sub / sample) so you hear only this wavetable");
+    soloToggle.onClick = [this] { proc.setSolo (soloToggle.getToggleState()); };
+    addAndMakeVisible (soloToggle);
     oscBox.onChange = [this] { proc.setVitalOscillator (oscBox.getSelectedId() - 1); };
     addAndMakeVisible (oscBox);
 
@@ -543,7 +547,8 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     proc.onVitalSent = [this] (const juce::String& error)
     {
         if (error.isNotEmpty()) setStatus (error, true);
-        else setStatus ("Vital updated: \"" + proc.getTableName() + "\" is in oscillator " + juce::String (proc.getVitalOscillator() + 1) + ".");
+        else setStatus (proc.getHostedShortName() + " updated: \"" + proc.getPlayName() + "\" is playing in oscillator "
+                        + proc.oscillatorLabel (proc.getVitalOscillator()) + (proc.getSolo() ? " (solo)." : "."));
         refreshSynthControls();
     };
     populateSynthMenu();
@@ -653,18 +658,19 @@ void WavetableMorpherEditor::resized()
     auto knobArea = r.removeFromBottom (92);
     r.removeFromBottom (6);
     auto synthRow = r.removeFromBottom (28);
-    playWithLabel.setBounds (synthRow.removeFromLeft (66));
-    synthBox.setBounds (synthRow.removeFromLeft (220));
+    playWithLabel.setBounds (synthRow.removeFromLeft (62));
+    synthBox.setBounds (synthRow.removeFromLeft (190));
     synthRow.removeFromLeft (8);
-    openSynthButton.setBounds (synthRow.removeFromLeft (96));
-    synthRow.removeFromLeft (16);
-    dragHandle.setBounds (synthRow.removeFromRight (140));
-    synthRow.removeFromRight (16);
-    sendButton.setBounds (synthRow.removeFromLeft (110));
+    openSynthButton.setBounds (synthRow.removeFromLeft (92));
+    synthRow.removeFromLeft (14);
+    dragHandle.setBounds (synthRow.removeFromRight (132));
+    synthRow.removeFromRight (12);
+    sendButton.setBounds (synthRow.removeFromLeft (124));
     synthRow.removeFromLeft (8);
-    oscBox.setBounds (synthRow.removeFromLeft (80));
+    oscBox.setBounds (synthRow.removeFromLeft (84));
     synthRow.removeFromLeft (8);
-    autoSendToggle.setBounds (synthRow.removeFromLeft (96));
+    autoSendToggle.setBounds (synthRow.removeFromLeft (92));
+    soloToggle.setBounds (synthRow.removeFromLeft (64));
     previewTitle.setBounds (knobArea.removeFromLeft (80).withTrimmedTop (8));
     const int kw = knobArea.getWidth() / std::max (1, knobs.size());
     for (auto* k : knobs)
@@ -733,7 +739,7 @@ void WavetableMorpherEditor::refreshSynthControls()
 {
     const auto file = proc.getHostedSynthFile();
     const bool hosted = proc.getHostedSynth() != nullptr;
-    const bool vital = proc.isHostedVital();
+    const bool vital = proc.canSendToSynth(); // Vital or Serum 2
 
     if (! loadingSynth)
     {
@@ -757,9 +763,13 @@ void WavetableMorpherEditor::refreshSynthControls()
     sendButton.setVisible (vital);
     oscBox.setVisible (vital);
     autoSendToggle.setVisible (vital);
+    for (int i = 0; i < 3; ++i)
+        oscBox.changeItemText (i + 1, "Osc " + proc.oscillatorLabel (i));
     oscBox.setSelectedId (proc.getVitalOscillator() + 1, juce::dontSendNotification);
+    soloToggle.setVisible (vital);
+    soloToggle.setToggleState (proc.getSolo(), juce::dontSendNotification);
     autoSendToggle.setToggleState (proc.getAutoSend(), juce::dontSendNotification);
-    sendButton.setButtonText (vital && proc.isVitalUpToDate() ? juce::String::fromUTF8 ("Sent \xe2\x9c\x93") : juce::String ("Send to Vital"));
+    sendButton.setButtonText (vital && proc.isVitalUpToDate() ? juce::String::fromUTF8 ("Sent \xe2\x9c\x93") : "Send to " + proc.getHostedShortName());
 
     // The built-in synth's knobs do nothing while a real synth is playing.
     for (auto* k : knobs)
@@ -812,9 +822,11 @@ void WavetableMorpherEditor::synthChosen()
         }
 
         const auto name = file.getFileNameWithoutExtension();
-        safe->setStatus (safe->proc.isHostedVital()
-                             ? "Playing through Vital. Your morph goes into oscillator " + juce::String (safe->proc.getVitalOscillator() + 1)
-                                   + " automatically - play a note, and use Vital's Position knob to scan it."
+        auto& pr = safe->proc;
+        safe->setStatus (pr.canSendToSynth()
+                             ? "Playing through " + pr.getHostedShortName() + ": your wavetable goes into oscillator "
+                                   + pr.oscillatorLabel (pr.getVitalOscillator()) + (pr.getSolo() ? " (solo)" : "")
+                                   + " automatically. Use the frame slider to move through it."
                              : "Playing through " + name + ". Drag the wavetable onto " + name + "'s oscillator using \"Drag to synth\".");
         safe->refreshSynthControls();
         safe->openSynthWindow();
@@ -864,7 +876,8 @@ void WavetableMorpherEditor::choosePlaySource (WavetableMorpherProcessor::PlaySo
     const auto what = p == PS::OscA ? "Oscillator A's wavetable (" + proc.getSlot (0).tableName() + ")"
                     : p == PS::OscB ? "Oscillator B's wavetable (" + proc.getSlot (1).tableName() + ")"
                                     : juce::String ("the morph");
-    setStatus ("Now playing " + what + (proc.isHostedVital() ? " through Vital oscillator " + juce::String (proc.getVitalOscillator() + 1) + "." : "."));
+    setStatus ("Now playing " + what + (proc.canSendToSynth() ? " through " + proc.getHostedShortName() + " oscillator "
+                                            + proc.oscillatorLabel (proc.getVitalOscillator()) + "." : "."));
 }
 
 void WavetableMorpherEditor::setShowingSynth (bool shouldShow)
@@ -878,7 +891,7 @@ void WavetableMorpherEditor::setShowingSynth (bool shouldShow)
         if (proc.getSynthTable().empty())
             setStatus (note.isNotEmpty() ? note : "Reading the synth's oscillator 1...", note.isNotEmpty());
         else
-            setStatus ("Vital Osc 1: \"" + proc.getSynthTableName() + "\". Click or drag in the view to pick a frame, then Use as A / B."
+            setStatus (proc.getHostedShortName() + (proc.isHostedSerum() ? " Osc A" : " Osc 1") + ": \"" + proc.getSynthTableName() + "\". Click or drag in the view to pick a frame, then Use as A / B."
                        + (note.isNotEmpty() ? "  (" + note + ")" : juce::String()));
     }
 }
@@ -896,7 +909,7 @@ void WavetableMorpherEditor::updateTableView()
     playBButton.setToggleState (! showingSynth && ps == PS::OscB, juce::dontSendNotification);
 
     showSynthButton.setVisible (hosted);
-    showSynthButton.setButtonText (proc.isHostedVital() ? "View Vital Osc 1" : "View Synth Osc 1");
+    showSynthButton.setButtonText (proc.isHostedSerum() ? "View Serum Osc A" : proc.isHostedVital() ? "View Vital Osc 1" : "View Synth Osc 1");
     showSynthButton.setToggleState (showingSynth, juce::dontSendNotification);
 
     const bool haveSynthTable = ! proc.getSynthTable().empty();
