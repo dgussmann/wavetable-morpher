@@ -1,0 +1,15 @@
+WAVETABLE MORPHER - INSTALL
+
+Easiest: open Terminal and paste this one line (change the path if the folder isn't in Downloads):
+
+  xattr -dr com.apple.quarantine ~/Downloads/"Wavetable Morpher" && ~/Downloads/"Wavetable Morpher"/Install.command
+
+That copies:
+  Wavetable Morpher.vst3       -> ~/Library/Audio/Plug-Ins/VST3
+  Wavetable Morpher.component  -> ~/Library/Audio/Plug-Ins/Components   (Audio Unit, for Logic/GarageBand)
+  Wavetable Morpher.app        -> ~/Applications                        (standalone, no DAW needed)
+
+Then rescan plug-ins in your DAW. It shows up as an instrument from "dgussmann".
+
+Why the extra step? The plugin isn't signed with a paid Apple developer certificate, so macOS
+blocks anything downloaded from the internet until the "quarantine" flag is removed.
