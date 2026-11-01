@@ -233,8 +233,12 @@ void WavetableMorpherProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
         return;
     }
 
-    // No synth loaded yet: silence (there is no built-in synth any more).
+   #if WTM_BUILTIN_SYNTH
+    synth.renderNextBlock (buffer, midi, 0, numSamples);
+   #else
+    // Link version: no synth loaded yet = silence (there is no built-in synth).
     midi.clear();
+   #endif
 
     lastPosition = position;
     displayPosition.store (position);

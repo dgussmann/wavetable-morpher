@@ -490,7 +490,21 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     addChildComponent (useAsAButton);
     addChildComponent (useAsBButton);
 
-    // (No built-in synth: the wavetable always plays through Serum 2, Vital or another loaded synth.)
+   #if WTM_BUILTIN_SYNTH
+    previewTitle.setText ("Preview", juce::dontSendNotification);
+    styleLabel (previewTitle, 15.0f, Colours::accent, true);
+    addAndMakeVisible (previewTitle);
+
+    const std::pair<const char*, const char*> knobDefs[] = {
+        { ParamIDs::position, "Position" }, { ParamIDs::scanDepth, "Scan Depth" }, { ParamIDs::scanRate, "Scan Rate" },
+        { ParamIDs::attack, "Attack" },     { ParamIDs::decay, "Decay" },          { ParamIDs::sustain, "Sustain" },
+        { ParamIDs::release, "Release" },   { ParamIDs::volume, "Volume" },
+    };
+    for (const auto& [id, name] : knobDefs)
+        addAndMakeVisible (knobs.add (new LabelledKnob (proc.apvts, id, name)));
+   #else
+    // (Link version: no built-in synth - the wavetable always plays through Serum 2, Vital or another loaded synth.)
+   #endif
 
     // Play-through synth ---------------------------------------------------
     playWithLabel.setText ("Play with", juce::dontSendNotification);
@@ -558,8 +572,8 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
 
     refreshAll(); // show the current state straight away (play source, synth controls, slider readout)
 
-    // Nothing to play through yet (a fresh instance)? Load Serum 2 - or Vital - straight away.
-    if (proc.getHostedSynth() == nullptr && ! proc.isRestoringSynth() && ! synthFiles.isEmpty())
+    // Link version: nothing to play through yet (a fresh instance)? Load Serum 2 - or Vital - straight away.
+    if (! WTM_BUILTIN_SYNTH && proc.getHostedSynth() == nullptr && ! proc.isRestoringSynth() && ! synthFiles.isEmpty())
     {
         int pick = 0;
         for (int i = 0; i < synthFiles.size(); ++i)
@@ -573,14 +587,14 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
             }
         });
     }
-    else if (proc.getHostedSynth() == nullptr)
+    else if (! WTM_BUILTIN_SYNTH && proc.getHostedSynth() == nullptr)
     {
         setStatus ("Choose a synth in \"Play with\" (Serum 2 or Vital) to hear your wavetable.");
     }
 
     setResizable (true, true);
-    setResizeLimits (940, 680, 1600, 1150);
-    setSize (1020, 720);
+    setResizeLimits (940, WTM_BUILTIN_SYNTH ? 780 : 680, 1600, 1150);
+    setSize (1020, WTM_BUILTIN_SYNTH ? 820 : 720);
     startTimerHz (30);
 }
 
@@ -666,7 +680,15 @@ void WavetableMorpherEditor::resized()
 
     r.removeFromTop (12);
 
-    // Wavetable view + synth row
+    // Wavetable view + synth row (+ built-in synth knobs)
+   #if WTM_BUILTIN_SYNTH
+    auto knobArea = r.removeFromBottom (92);
+    r.removeFromBottom (6);
+    previewTitle.setBounds (knobArea.removeFromLeft (80).withTrimmedTop (8));
+    const int kw = knobArea.getWidth() / std::max (1, knobs.size());
+    for (auto* k : knobs)
+        k->setBounds (knobArea.removeFromLeft (kw).reduced (4, 0));
+   #endif
     auto synthRow = r.removeFromBottom (28);
     playWithLabel.setBounds (synthRow.removeFromLeft (62));
     synthBox.setBounds (synthRow.removeFromLeft (190));
@@ -728,6 +750,10 @@ void WavetableMorpherEditor::populateSynthMenu()
     synthFiles = proc.findSynthPlugins();
     synthBox.clear (juce::dontSendNotification);
     synthBox.setTextWhenNothingSelected ("Choose a synth...");
+   #if WTM_BUILTIN_SYNTH
+    synthBox.addItem ("Built-in preview synth", 1);
+    synthBox.addSeparator();
+   #endif
 
     for (int i = 0; i < synthFiles.size(); ++i)
         synthBox.addItem (synthFiles.getReference (i).getFileNameWithoutExtension(), 100 + i);
@@ -748,7 +774,7 @@ void WavetableMorpherEditor::refreshSynthControls()
 
     if (! loadingSynth)
     {
-        int id = 0;
+        int id = WTM_BUILTIN_SYNTH ? 1 : 0;
         if (hosted)
         {
             const int index = synthFiles.indexOf (file);
@@ -776,6 +802,13 @@ void WavetableMorpherEditor::refreshSynthControls()
     soloToggle.setToggleState (proc.getSolo(), juce::dontSendNotification);
     autoSendToggle.setToggleState (proc.getAutoSend(), juce::dontSendNotification);
     sendButton.setButtonText (vital && proc.isVitalUpToDate() ? juce::String::fromUTF8 ("Sent \xe2\x9c\x93") : "Send to " + proc.getHostedShortName());
+
+   #if WTM_BUILTIN_SYNTH
+    // The built-in synth's knobs do nothing while a real synth is playing.
+    for (auto* k : knobs)
+        k->setEnabled (! hosted);
+    previewTitle.setText (hosted ? "Built-in" : "Preview", juce::dontSendNotification);
+   #endif
 }
 
 void WavetableMorpherEditor::synthChosen()
@@ -789,6 +822,15 @@ void WavetableMorpherEditor::synthChosen()
         return;
     }
 
+   #if WTM_BUILTIN_SYNTH
+    if (id == 1)
+    {
+        proc.unloadHostedSynth();
+        setStatus ("Using the built-in preview synth.");
+        refreshSynthControls();
+        return;
+    }
+   #endif
     if (id <= 0)
         return;
 

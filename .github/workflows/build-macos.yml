@@ -27,29 +27,33 @@ jobs:
 
       - name: Sign (ad-hoc) and package
         run: |
-          ART="build/WavetableMorpher_artefacts/Release"
           DIST="dist/Wavetable Morpher"
           mkdir -p "$DIST"
-          cp -R "$ART/VST3/Wavetable Morpher.vst3" "$DIST/"
-          cp -R "$ART/AU/Wavetable Morpher.component" "$DIST/"
-          cp -R "$ART/Standalone/Wavetable Morpher.app" "$DIST/"
+          for T in WavetableMorpher WavetableMorpherLink; do
+            ART="build/${T}_artefacts/Release"
+            cp -R "$ART"/VST3/*.vst3 "$DIST/"
+            cp -R "$ART"/AU/*.component "$DIST/"
+            cp -R "$ART"/Standalone/*.app "$DIST/"
+          done
           for b in "$DIST"/*.vst3 "$DIST"/*.component "$DIST"/*.app; do
             codesign --force --deep --sign - "$b"
           done
           cp packaging/Install.command "$DIST/"
           cp packaging/HOW-TO-INSTALL.txt "$DIST/"
           chmod +x "$DIST/Install.command"
-          file "$DIST/Wavetable Morpher.vst3/Contents/MacOS/Wavetable Morpher"
+          ls "$DIST"
+          file "$DIST/Wavetable Morpher Link.vst3/Contents/MacOS/Wavetable Morpher Link"
           (cd dist && ditto -c -k --keepParent "Wavetable Morpher" "Wavetable-Morpher-macOS-arm64.zip")
 
-      - name: Validate Audio Unit
+      - name: Validate Audio Units
         continue-on-error: true
         run: |
           mkdir -p ~/Library/Audio/Plug-Ins/Components
-          cp -R "dist/Wavetable Morpher/Wavetable Morpher.component" ~/Library/Audio/Plug-Ins/Components/
+          cp -R "dist/Wavetable Morpher"/*.component ~/Library/Audio/Plug-Ins/Components/
           killall -9 AudioComponentRegistrar 2>/dev/null || true
           sleep 3
-          auval -v aumu Wtmr Dgsm
+          auval -v aumu Wtmr Dgsm | tail -3
+          auval -v aumu Wtml Dgsm | tail -3
 
       - uses: actions/upload-artifact@v4
         with:

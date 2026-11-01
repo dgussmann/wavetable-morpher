@@ -33,22 +33,6 @@ FetchContent_Declare(zstd
 FetchContent_MakeAvailable(zstd)
 set_target_properties(libzstd_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-juce_add_plugin(WavetableMorpher
-    PRODUCT_NAME "Wavetable Morpher"
-    COMPANY_NAME "dgussmann"
-    BUNDLE_ID com.dgussmann.wavetablemorpher
-    PLUGIN_MANUFACTURER_CODE Dgsm
-    PLUGIN_CODE Wtmr
-    FORMATS VST3 AU Standalone
-    IS_SYNTH TRUE
-    NEEDS_MIDI_INPUT TRUE
-    NEEDS_MIDI_OUTPUT FALSE
-    IS_MIDI_EFFECT FALSE
-    EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    COPY_PLUGIN_AFTER_BUILD FALSE
-    VST3_CATEGORIES Instrument Synth
-    AU_MAIN_TYPE kAudioUnitType_MusicDevice)
-
 set(WTM_CORE_SOURCES
     Source/WaveSources.cpp
     Source/WavetableEngine.cpp
@@ -57,29 +41,54 @@ set(WTM_CORE_SOURCES
     Source/SerumBridge.cpp
     Source/PluginState.cpp)
 
-target_sources(WavetableMorpher PRIVATE
-    ${WTM_CORE_SOURCES}
-    Source/PreviewSynth.cpp
-    Source/Views.cpp
-    Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp)
+# Two versions from the same code:
+#   Wavetable Morpher       - with the built-in preview synth
+#   Wavetable Morpher Link  - no built-in synth; always plays through Serum 2 / Vital (loads Serum 2 automatically)
+function(wtm_add_variant target product plugin_code bundle_id builtin)
+    juce_add_plugin(${target}
+        PRODUCT_NAME "${product}"
+        COMPANY_NAME "dgussmann"
+        BUNDLE_ID ${bundle_id}
+        PLUGIN_MANUFACTURER_CODE Dgsm
+        PLUGIN_CODE ${plugin_code}
+        FORMATS VST3 AU Standalone
+        IS_SYNTH TRUE
+        NEEDS_MIDI_INPUT TRUE
+        NEEDS_MIDI_OUTPUT FALSE
+        IS_MIDI_EFFECT FALSE
+        EDITOR_WANTS_KEYBOARD_FOCUS TRUE
+        COPY_PLUGIN_AFTER_BUILD FALSE
+        VST3_CATEGORIES Instrument Synth
+        AU_MAIN_TYPE kAudioUnitType_MusicDevice)
 
-target_compile_definitions(WavetableMorpher PUBLIC
-    JUCE_PLUGINHOST_VST3=1
-    JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0)
+    target_sources(${target} PRIVATE
+        ${WTM_CORE_SOURCES}
+        Source/PreviewSynth.cpp
+        Source/Views.cpp
+        Source/PluginProcessor.cpp
+        Source/PluginEditor.cpp)
 
-target_include_directories(WavetableMorpher PRIVATE ${zstd_SOURCE_DIR}/lib)
-target_link_libraries(WavetableMorpher
-    PRIVATE
-        juce::juce_audio_utils
-        juce::juce_cryptography
-        libzstd_static
-    PUBLIC
-        juce::juce_recommended_config_flags
-        juce::juce_recommended_lto_flags
-        juce::juce_recommended_warning_flags)
+    target_compile_definitions(${target} PUBLIC
+        WTM_BUILTIN_SYNTH=${builtin}
+        JUCE_PLUGINHOST_VST3=1
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_VST3_CAN_REPLACE_VST2=0)
+
+    target_include_directories(${target} PRIVATE ${zstd_SOURCE_DIR}/lib)
+    target_link_libraries(${target}
+        PRIVATE
+            juce::juce_audio_utils
+            juce::juce_cryptography
+            libzstd_static
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_lto_flags
+            juce::juce_recommended_warning_flags)
+endfunction()
+
+wtm_add_variant(WavetableMorpher     "Wavetable Morpher"      Wtmr com.dgussmann.wavetablemorpher     1)
+wtm_add_variant(WavetableMorpherLink "Wavetable Morpher Link" Wtml com.dgussmann.wavetablemorpherlink 0)
 
 if(WTM_BUILD_TESTS)
     juce_add_console_app(WavetableMorpherTests PRODUCT_NAME "WavetableMorpherTests")
