@@ -544,9 +544,15 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     savePatchToggle.onClick = [this]
     {
         proc.setSavePatch (savePatchToggle.getToggleState());
-        saveButton.setButtonText (proc.canSendToSynth() && proc.getSavePatch() ? "Save Table + Patch" : "Save Wavetable");
+        refreshSynthControls();
     };
     addAndMakeVisible (savePatchToggle);
+
+    styleLabel (patchNameLabel, 12.0f, Colours::dimText);
+    patchNameLabel.setJustificationType (juce::Justification::centredRight);
+    patchNameLabel.setMinimumHorizontalScale (0.6f);
+    patchNameLabel.setTooltip ("The synth patch is saved under its own name plus \"WM\"");
+    addChildComponent (patchNameLabel);
     oscBox.onChange = [this] { proc.setVitalOscillator (oscBox.getSelectedId() - 1); };
     addAndMakeVisible (oscBox);
 
@@ -711,7 +717,8 @@ void WavetableMorpherEditor::resized()
     synthRow.removeFromLeft (8);
     autoSendToggle.setBounds (synthRow.removeFromLeft (90));
     soloToggle.setBounds (synthRow.removeFromLeft (58));
-    savePatchToggle.setBounds (synthRow.removeFromLeft (100));
+    savePatchToggle.setBounds (synthRow.removeFromLeft (96));
+    patchNameLabel.setBounds (synthRow.reduced (4, 0));
 
     r.removeFromBottom (8);
     frameScrub.setBounds (r.removeFromBottom (24));
@@ -811,6 +818,10 @@ void WavetableMorpherEditor::refreshSynthControls()
     soloToggle.setToggleState (proc.getSolo(), juce::dontSendNotification);
     savePatchToggle.setVisible (vital);
     savePatchToggle.setToggleState (proc.getSavePatch(), juce::dontSendNotification);
+    savePatchToggle.setTooltip ("Save Wavetable also saves the synth's current sound as \"" + proc.getPatchSaveName()
+                                + "\" (its patch name + WM), with your wavetable, in " + proc.getHostedShortName() + "'s preset browser");
+    patchNameLabel.setVisible (vital && proc.getSavePatch());
+    patchNameLabel.setText ("Patch: " + proc.getPatchSaveName(), juce::dontSendNotification);
     saveButton.setButtonText (vital && proc.getSavePatch() ? "Save Table + Patch" : "Save Wavetable");
     autoSendToggle.setToggleState (proc.getAutoSend(), juce::dontSendNotification);
     sendButton.setButtonText (vital && proc.isVitalUpToDate() ? juce::String::fromUTF8 ("Sent \xe2\x9c\x93") : "Send to " + proc.getHostedShortName());
@@ -1056,7 +1067,7 @@ void WavetableMorpherEditor::saveTable()
     for (auto d : sendTargets())
         if (proc.isDestinationEnabled (d) && proc.getDestinationFolder (d).getChildFile (fileName).existsAsFile())
             existing.add (destinationName (d));
-    if (proc.canSendToSynth() && proc.getSavePatch() && proc.synthPatchFile (name).existsAsFile())
+    if (proc.canSendToSynth() && proc.getSavePatch() && proc.synthPatchFile().existsAsFile())
         existing.add (proc.getHostedShortName() + " patches");
 
     if (existing.isEmpty())
@@ -1104,8 +1115,8 @@ void WavetableMorpherEditor::writeAll (const std::vector<Cycle>& frames, const j
     if (proc.canSendToSynth() && proc.getSavePatch())
     {
         juce::File patch;
-        const auto r = proc.saveSynthPatch (proc.getTableName(), patch);
-        if (r.wasOk()) saved.add (proc.getHostedShortName() + " patch");
+        const auto r = proc.saveSynthPatch (patch);
+        if (r.wasOk()) saved.add (proc.getHostedShortName() + " patch \"" + proc.getPatchSaveName() + "\"");
         else           problems.add (proc.getHostedShortName() + " patch: " + r.getErrorMessage());
     }
 

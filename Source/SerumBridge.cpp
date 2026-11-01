@@ -284,6 +284,25 @@ namespace wtm::serum
         return parse (state, p).wasOk();
     }
 
+    juce::String getPresetName (const juce::MemoryBlock& state)
+    {
+        Parsed parsed;
+        if (parse (state, parsed).failed())
+            return {};
+
+        const Cbor cbor { static_cast<const juce::uint8*> (parsed.cbor.getData()), parsed.cbor.getSize() };
+        size_t s = 0, e = 0;
+        juce::String name;
+        if (cbor.find (0, { "presetName" }, 0, s, e))
+        {
+            size_t pos = s;
+            cbor.readText (pos, name);
+        }
+        if (name.trim().isEmpty())
+            name = juce::JSON::parse (parsed.headerJson)["presetName"].toString();
+        return name.trim();
+    }
+
     juce::Result getOscillatorWavetable (const juce::MemoryBlock& state, int osc, juce::String& relativePath, int& numSamples)
     {
         Parsed parsed;

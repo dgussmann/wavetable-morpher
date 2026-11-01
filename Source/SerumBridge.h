@@ -25,6 +25,9 @@ namespace wtm::serum
     juce::Result makePreset (const juce::MemoryBlock& state, int osc, const juce::String& relativePath, int numSamples,
                              const juce::String& presetName, juce::MemoryBlock& presetFile);
 
+    /** The name of the preset currently loaded in Serum (empty if none). */
+    juce::String getPresetName (const juce::MemoryBlock& state);
+
     /** Whether this looks like Serum 2 data at all. */
     bool looksLikeSerumState (const juce::MemoryBlock& state);
 }

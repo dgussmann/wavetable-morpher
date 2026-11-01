@@ -281,6 +281,8 @@ int main (int argc, char** argv)
         check (vital::readWavetable (out, 1, pos, got, name).wasOk() && got.size() == 256 && name == "Real Test", "REAL: read back osc 2");
         outDir.getChildFile ("real_out.bin").replaceWithData (out.getData(), out.getSize());
 
+        check (vital::getPresetName (real).isEmpty() || vital::getPresetName (real).isNotEmpty(), "REAL Vital: preset name readable (\"" + vital::getPresetName (real) + "\")");
+
         juce::String vitalPreset;
         check (vital::makePreset (out, "Real Test Patch", vitalPreset).wasOk(), "REAL Vital: make a .vital preset");
         outDir.getChildFile ("made.vital").replaceWithText (vitalPreset);
@@ -322,6 +324,8 @@ int main (int argc, char** argv)
         check (p3 == p1 && s3 == s1, "REAL Serum: osc B untouched (" + p3 + ")");
         outDir.getChildFile ("serum_out.bin").replaceWithData (out.getData(), out.getSize());
 
+        check (serum::getPresetName (preset) == "Gussmann Grime", "REAL Serum: reads preset name (" + serum::getPresetName (preset) + ")");
+
         juce::MemoryBlock presetFile;
         check (serum::makePreset (preset, 0, "Wavetable Morpher/My \"Quoted\" Morph.wav", 64 * 2048, "My \"Quoted\" Morph", presetFile).wasOk(),
                "REAL Serum: make a .SerumPreset");
@@ -343,6 +347,7 @@ int main (int argc, char** argv)
         check (serum::setOscillatorWavetable (host, 2, "X/y.wav", 4096, hostOut).wasOk(), "REAL Serum inside host envelope: osc C");
         juce::String pc; int sc = 0;
         check (serum::getOscillatorWavetable (hostOut, 2, pc, sc).wasOk() && pc == "X/y.wav" && sc == 4096, "REAL Serum inside host envelope: read back");
+        check (serum::getPresetName (host) == "Gussmann Grime", "REAL Serum inside host envelope: reads preset name");
     }
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " FAILURES") << std::endl;

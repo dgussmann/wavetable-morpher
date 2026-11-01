@@ -38,6 +38,9 @@ namespace wtm::vital
         Vital presets embed their wavetables, so the table travels with the preset. */
     juce::Result makePreset (const juce::MemoryBlock& state, const juce::String& presetName, juce::String& presetJson);
 
+    /** The name of the preset currently loaded in Vital (empty if none). */
+    juce::String getPresetName (const juce::MemoryBlock& state);
+
     /** The "author" of an oscillator's wavetable ("Wavetable Morpher" when it's one we sent). */
     juce::String tableAuthor (const juce::MemoryBlock& state, int oscillatorIndex);
 

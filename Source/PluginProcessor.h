@@ -166,8 +166,13 @@ public:
 
     /** Saves the loaded synth's current sound - with the playing wavetable - as a preset in that synth's
         own preset browser (Serum 2: .SerumPreset, Vital: .vital). Returns the file written in `written`. */
-    juce::Result saveSynthPatch (const juce::String& name, juce::File& written);
-    juce::File synthPatchFile (const juce::String& name) const;
+    juce::Result saveSynthPatch (juce::File& written);
+    juce::File synthPatchFile() const;
+
+    /** The saved patch is named after the patch loaded in the synth, plus " WM"
+        (e.g. "Gussmann Grime" -> "Gussmann Grime WM"). Falls back to the wavetable name. */
+    juce::String getPatchSaveName() const;
+    juce::String getSynthPresetName() const { return synthPresetName; }
     bool getSavePatch() const noexcept { return savePatch; }
     void setSavePatch (bool b) { savePatch = b; }
 
@@ -258,7 +263,7 @@ private:
 
     // Synth's oscillator 1, for display
     std::vector<wtm::Cycle> synthTable;
-    juce::String synthTableName, synthTableNote;
+    juce::String synthTableName, synthTableNote, synthPresetName;
     juce::int64 synthFingerprint = 0;
     int pollCounter = 0;
 

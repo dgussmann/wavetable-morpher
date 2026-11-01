@@ -856,6 +856,7 @@ void WavetableMorpherProcessor::unloadHostedSynth()
     synthTable.clear();
     synthTableName.clear();
     synthTableNote.clear();
+    synthPresetName.clear();
     synthFingerprint = 0;
 
     old->releaseResources();
@@ -947,20 +948,32 @@ juce::Result WavetableMorpherProcessor::sendToSerumNow (const std::vector<wtm::C
     return juce::Result::ok();
 }
 
-juce::File WavetableMorpherProcessor::synthPatchFile (const juce::String& name) const
+juce::String WavetableMorpherProcessor::getPatchSaveName() const
 {
-    const auto legal = juce::File::createLegalFileName (name.trim());
+    auto base = synthPresetName.trim();
+    // Serum shows an empty patch as "- Init -"
+    base = base.trimCharactersAtStart ("- ").trimCharactersAtEnd (" -").trim();
+    if (base.isEmpty())
+        base = tableName.trim().isNotEmpty() ? tableName.trim() : juce::String ("Wavetable Morpher");
+
+    return base.endsWith (" WM") ? base : base + " WM";
+}
+
+juce::File WavetableMorpherProcessor::synthPatchFile() const
+{
+    const auto legal = juce::File::createLegalFileName (getPatchSaveName());
     if (hostedIsSerum) return wtm::detectPresetFolder (wtm::Destination::Serum2).getChildFile (legal + ".SerumPreset");
     if (hostedIsVital) return wtm::detectPresetFolder (wtm::Destination::Vital).getChildFile (legal + ".vital");
     return {};
 }
 
-juce::Result WavetableMorpherProcessor::saveSynthPatch (const juce::String& name, juce::File& written)
+juce::Result WavetableMorpherProcessor::saveSynthPatch (juce::File& written)
 {
+    const auto name = getPatchSaveName();
     if (hosted == nullptr || ! canSendToSynth())
         return juce::Result::fail ("Load Serum 2 or Vital to save a patch.");
 
-    written = synthPatchFile (name);
+    written = synthPatchFile();
     if (written == juce::File())
         return juce::Result::fail ("Couldn't find " + getHostedShortName() + "'s preset folder.");
     if (! written.getParentDirectory().isDirectory() && written.getParentDirectory().createDirectory().failed())
@@ -1046,6 +1059,15 @@ void WavetableMorpherProcessor::pollSynthTable (bool force)
 
     juce::MemoryBlock state;
     hosted->getStateInformation (state);
+
+    {
+        const auto presetName = hostedIsSerum ? wtm::serum::getPresetName (state) : wtm::vital::getPresetName (state);
+        if (presetName != synthPresetName)
+        {
+            synthPresetName = presetName;
+            sendChangeMessage();
+        }
+    }
 
     if (hostedIsSerum)
     {

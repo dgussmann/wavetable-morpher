@@ -136,6 +136,7 @@ private:
     juce::ComboBox synthBox, oscBox;
     juce::TextButton openSynthButton { "Open Synth" }, sendButton { "Send to Vital" };
     juce::ToggleButton autoSendToggle { "Auto-send" }, soloToggle { "Solo" }, savePatchToggle { "Save patch" };
+    juce::Label patchNameLabel;
     DragHandle dragHandle;
     juce::Array<juce::File> synthFiles;
     std::unique_ptr<HostedSynthWindow> synthWindow;

@@ -445,6 +445,12 @@ namespace wtm::vital
         return juce::Result::ok();
     }
 
+    juce::String getPresetName (const juce::MemoryBlock& state)
+    {
+        ParsedState parsed;
+        return parseState (state, parsed).wasOk() ? parsed.root["preset_name"].toString().trim() : juce::String();
+    }
+
     juce::String tableAuthor (const juce::MemoryBlock& state, int osc)
     {
         ParsedState parsed;
