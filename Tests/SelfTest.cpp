@@ -3,6 +3,7 @@
 #include "../Source/WaveSources.h"
 #include "../Source/WavetableEngine.h"
 #include "../Source/WavetableExporter.h"
+#include "../Source/VitalBridge.h"
 
 using namespace wtm;
 
@@ -119,6 +120,54 @@ int main (int argc, char** argv)
         const auto ms = juce::Time::getMillisecondCounterHiRes() - t0;
         std::cout << "  (256-frame spectral build + playback tables: " << (int) ms << " ms)" << std::endl;
         check (t.getNumFrames() == 256, "256-frame table builds");
+    }
+
+    // Vital: write a morph into a mock Vital patch and read it back
+    {
+        auto makeTable = [&] (const juce::String& name, const Cycle& c)
+        {
+            return "{\"author\":\"\",\"full_normalize\":true,\"groups\":[{\"components\":[{\"interpolation\":1,"
+                   "\"interpolation_style\":1,\"keyframes\":[{\"position\":0,\"wave_data\":\""
+                   + juce::Base64::toBase64 (c.data(), c.size() * sizeof (float))
+                   + "\"}],\"type\":\"Wave Source\"}]}],\"name\":\"" + name + "\",\"remove_all_dc\":true,\"version\":\"1.5.5\"}";
+        };
+        const auto json = "{\"author\":\"me\",\"preset_name\":\"Test\",\"settings\":{\"osc_1_on\":1.0,\"osc_2_on\":0.0,"
+                          "\"filter_1_cutoff\":60.25,\"wavetables\":["
+                          + makeTable ("Init", saw) + "," + makeTable ("Other", sine) + "," + makeTable ("Third", sine)
+                          + "]},\"synth_version\":\"1.5.5\"}";
+        juce::MemoryBlock state;
+        state.append (json.toRawUTF8(), json.getNumBytesAsUTF8());
+        state.append ("\0", 1);
+
+        MorphSettings ms; ms.numFrames = 256;
+        const auto frames = buildMorph (sine, saw, ms);
+        juce::MemoryBlock out;
+        const auto r = vital::injectWavetable (state, frames, 1, "Test Morph", out);
+        check (r.wasOk(), "inject into Vital osc 2: " + r.getErrorMessage());
+
+        std::vector<int> pos; std::vector<Cycle> got; juce::String name;
+        check (vital::readWavetable (out, 1, pos, got, name).wasOk() && got.size() == 256, "Vital osc 2 now holds 256 keyframes");
+        check (name == "Test Morph", "Vital table named after your wavetable");
+        check (! pos.empty() && pos.front() == 0 && pos.back() == 256, "keyframes span Vital positions 0..256");
+        bool increasing = true; for (size_t i = 1; i < pos.size(); ++i) increasing &= pos[i] > pos[i - 1];
+        check (increasing, "keyframe positions strictly increase");
+        check (got.size() == 256 && maxDiff (got[0], frames[0]) < 1e-7f && maxDiff (got[255], frames[255]) < 1e-7f, "frames survive exactly");
+
+        std::vector<int> p0; std::vector<Cycle> g0; juce::String n0;
+        vital::readWavetable (out, 0, p0, g0, n0);
+        check (n0 == "Init" && g0.size() == 1 && maxDiff (g0[0], saw) < 1e-7f, "other oscillators untouched");
+
+        juce::var root;
+        const auto text = juce::String::fromUTF8 (static_cast<const char*> (out.getData()), (int) out.getSize() - 1);
+        check (juce::JSON::parse (text, root).wasOk(), "result is valid JSON");
+        check ((double) root["settings"]["osc_2_on"] == 1.0, "target oscillator switched on");
+        check (std::abs ((double) root["settings"]["filter_1_cutoff"] - 60.25) < 1e-9, "rest of the patch kept");
+        check (root["preset_name"].toString() == "Test" && static_cast<const char*> (out.getData())[out.getSize() - 1] == 0,
+               "preset name kept, trailing null kept");
+
+        juce::MemoryBlock bad;
+        bad.append ("nonsense", 8);
+        check (vital::injectWavetable (bad, frames, 0, "x", out).failed(), "non-Vital data is refused safely");
     }
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " FAILURES") << std::endl;

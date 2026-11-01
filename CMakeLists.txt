@@ -37,7 +37,8 @@ juce_add_plugin(WavetableMorpher
 set(WTM_CORE_SOURCES
     Source/WaveSources.cpp
     Source/WavetableEngine.cpp
-    Source/WavetableExporter.cpp)
+    Source/WavetableExporter.cpp
+    Source/VitalBridge.cpp)
 
 target_sources(WavetableMorpher PRIVATE
     ${WTM_CORE_SOURCES}
@@ -47,6 +48,7 @@ target_sources(WavetableMorpher PRIVATE
     Source/PluginEditor.cpp)
 
 target_compile_definitions(WavetableMorpher PUBLIC
+    JUCE_PLUGINHOST_VST3=1
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0)

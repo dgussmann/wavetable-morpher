@@ -46,6 +46,8 @@ WavetableMorpherProcessor::WavetableMorpherProcessor()
         synth.addVoice (new wtm::WavetableVoice (renderContext));
     synth.addSound (new wtm::WavetableSound());
 
+    formatManager.addFormat (std::make_unique<juce::VST3PluginFormat>());
+
     worker = std::make_unique<Worker> (*this);
     lastRequestedSettings = getMorphSettings();
     requestRebuild();
@@ -57,6 +59,9 @@ WavetableMorpherProcessor::WavetableMorpherProcessor()
 WavetableMorpherProcessor::~WavetableMorpherProcessor()
 {
     stopTimer();
+    onHostedSynthWillChange = nullptr;
+    onVitalSent = nullptr;
+    unloadHostedSynth();
     worker->signalThreadShouldExit();
     worker->notify();
     worker->stopThread (4000);
@@ -111,12 +116,38 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableMorpherProcessor::c
 }
 
 //==============================================================================
-void WavetableMorpherProcessor::prepareToPlay (double sampleRate, int)
+void WavetableMorpherProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
+    currentBlockSize = std::max (32, samplesPerBlock);
     synth.setCurrentPlaybackSampleRate (sampleRate);
     keyboardState.reset();
     lfoPhase = 0.0;
+    heldNotes = 0;
+    prepared = true;
+
+    const juce::ScopedLock sl (hostLock);
+    prepareHosted();
+}
+
+void WavetableMorpherProcessor::releaseResources()
+{
+    const juce::ScopedLock sl (hostLock);
+    if (hosted != nullptr)
+        hosted->releaseResources();
+}
+
+void WavetableMorpherProcessor::prepareHosted()
+{
+    // Caller holds hostLock.
+    if (hosted == nullptr)
+        return;
+
+    hosted->setRateAndBufferSizeDetails (currentSampleRate, currentBlockSize);
+    hosted->prepareToPlay (currentSampleRate, currentBlockSize);
+    const int channels = std::max ({ 2, hosted->getTotalNumInputChannels(), hosted->getTotalNumOutputChannels() });
+    hostBuffer.setSize (channels, currentBlockSize * 2, false, true, false);
+    setLatencySamples (hosted->getLatencySamples());
 }
 
 bool WavetableMorpherProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -159,6 +190,38 @@ void WavetableMorpherProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     renderContext.envelope.release = apvts.getRawParameterValue (ParamIDs::release)->load();
 
     keyboardState.processNextMidiBuffer (midi, 0, numSamples, true);
+
+    // Track held notes, so Vital is only updated between notes (updating it cuts sound).
+    for (const auto meta : midi)
+    {
+        const auto m = meta.getMessage();
+        if (m.isNoteOn())                              heldNotes.fetch_add (1);
+        else if (m.isNoteOff() && heldNotes.load() > 0) heldNotes.fetch_sub (1);
+        else if (m.isAllNotesOff() || m.isAllSoundOff()) heldNotes = 0;
+    }
+
+    if (hostedActive.load())
+    {
+        // Play through the loaded synth (Vital, Serum 2...). Silence for a moment while it's being swapped/updated.
+        const juce::ScopedTryLock tl (hostLock);
+        if (tl.isLocked() && hosted != nullptr)
+        {
+            if (hostBuffer.getNumSamples() < numSamples)
+                hostBuffer.setSize (hostBuffer.getNumChannels(), numSamples, false, false, true);
+
+            juce::AudioBuffer<float> view (hostBuffer.getArrayOfWritePointers(), hostBuffer.getNumChannels(), numSamples);
+            view.clear();
+            hosted->processBlock (view, midi);
+
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                buffer.copyFrom (ch, 0, view, std::min (ch, view.getNumChannels() - 1), 0, numSamples);
+        }
+
+        midi.clear();
+        displayPosition.store (base);
+        return;
+    }
+
     synth.renderNextBlock (buffer, midi, 0, numSamples);
 
     lastPosition = position;
@@ -183,6 +246,16 @@ void WavetableMorpherProcessor::timerCallback()
     if (s.numFrames != lastRequestedSettings.numFrames || s.mode != lastRequestedSettings.mode
         || s.curve != lastRequestedSettings.curve || s.normaliseFrames != lastRequestedSettings.normaliseFrames)
         requestRebuild();
+
+    // Vital auto-send: once the morph has settled for a moment and no notes are held.
+    if (autoSend && hostedIsVital && hosted != nullptr && lastSentVersion != tableVersion.load()
+        && heldNotes.load() == 0
+        && juce::Time::getMillisecondCounterHiRes() - lastTableChangeMs.load() > 250.0)
+    {
+        const auto r = sendToVital();
+        if (onVitalSent)
+            onVitalSent (r.wasOk() ? juce::String() : r.getErrorMessage());
+    }
 }
 
 void WavetableMorpherProcessor::requestRebuild()
@@ -231,6 +304,8 @@ void WavetableMorpherProcessor::rebuildWorker()
             displayFrames = std::move (frames);
         }
 
+        lastTableChangeMs = juce::Time::getMillisecondCounterHiRes();
+        tableVersion.fetch_add (1);
         sendChangeMessage();
     }
 }
@@ -419,6 +494,22 @@ void WavetableMorpherProcessor::getStateInformation (juce::MemoryBlock& destData
 
     state.appendChild (sources, nullptr);
 
+    {
+        juce::ValueTree host ("HOST");
+        host.setProperty ("vitalOsc", vitalOsc, nullptr);
+        host.setProperty ("autoSend", autoSend, nullptr);
+
+        const juce::ScopedLock sl (lifetimeLock);
+        if (hosted != nullptr)
+        {
+            juce::MemoryBlock hostedState;
+            hosted->getStateInformation (hostedState);
+            host.setProperty ("file", hostedFile.getFullPathName(), nullptr);
+            host.setProperty ("state", hostedState.toBase64Encoding(), nullptr);
+        }
+        state.appendChild (host, nullptr);
+    }
+
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
@@ -435,7 +526,40 @@ void WavetableMorpherProcessor::setStateInformation (const void* data, int sizeI
 
     auto sources = state.getChildWithName ("SOURCES");
     state.removeChild (sources, nullptr);
+    auto host = state.getChildWithName ("HOST");
+    state.removeChild (host, nullptr);
     apvts.replaceState (state);
+
+    if (host.isValid())
+    {
+        vitalOsc = juce::jlimit (0, 2, (int) host.getProperty ("vitalOsc", 0));
+        autoSend = (bool) host.getProperty ("autoSend", true);
+
+        const auto path = host.getProperty ("file", "").toString();
+        juce::MemoryBlock hostedState;
+        hostedState.fromBase64Encoding (host.getProperty ("state", "").toString());
+
+        // Plugin loading must happen on the message thread.
+        juce::WeakReference<WavetableMorpherProcessor> weak (this);
+        juce::MessageManager::callAsync ([weak, path, hostedState]
+        {
+            auto* self = weak.get();
+            if (self == nullptr)
+                return;
+
+            if (path.isEmpty() || ! juce::File::isAbsolutePath (path) || ! juce::File (path).exists())
+            {
+                self->unloadHostedSynth();
+                return;
+            }
+
+            self->loadHostedSynth (juce::File (path), [weak, path] (juce::Result r)
+            {
+                if (auto* p = weak.get(); p != nullptr && r.failed() && p->onVitalSent)
+                    p->onVitalSent ("Couldn't reload " + juce::File (path).getFileNameWithoutExtension() + ": " + r.getErrorMessage());
+            }, &hostedState);
+        });
+    }
 
     if (sources.isValid())
     {
@@ -463,6 +587,168 @@ void WavetableMorpherProcessor::setStateInformation (const void* data, int sizeI
 
     requestRebuild();
     sendChangeMessage();
+}
+
+//==============================================================================
+juce::Array<juce::File> WavetableMorpherProcessor::findSynthPlugins() const
+{
+    juce::Array<juce::File> result;
+    const juce::File roots[] = {
+        juce::File ("/Library/Audio/Plug-Ins/VST3"),
+        juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile ("Library/Audio/Plug-Ins/VST3"),
+    };
+
+    for (const auto& root : roots)
+        for (const auto& f : root.findChildFiles (juce::File::findDirectories, true, "*.vst3"))
+            if (! f.getFileName().containsIgnoreCase ("Wavetable Morpher")
+                && ! f.getParentDirectory().getFileName().endsWithIgnoreCase (".vst3"))
+                result.addIfNotAlreadyThere (f);
+
+    struct Order
+    {
+        static int rank (const juce::File& f)
+        {
+            const auto n = f.getFileNameWithoutExtension().toLowerCase();
+            if (n.startsWith ("vital")) return 0;
+            if (n.startsWith ("serum 2") || n.startsWith ("serum2")) return 1;
+            if (n.startsWith ("serum")) return 2;
+            return 3;
+        }
+        static int compareElements (const juce::File& a, const juce::File& b)
+        {
+            const int ra = rank (a), rb = rank (b);
+            if (ra != rb) return ra < rb ? -1 : 1;
+            return a.getFileNameWithoutExtension().compareNatural (b.getFileNameWithoutExtension());
+        }
+    } order;
+    result.sort (order);
+    return result;
+}
+
+void WavetableMorpherProcessor::loadHostedSynth (const juce::File& bundle, std::function<void (juce::Result)> done,
+                                                 const juce::MemoryBlock* stateToRestore)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+
+    auto* format = formatManager.getFormat (0);
+    juce::OwnedArray<juce::PluginDescription> types;
+    format->findAllTypesForFile (types, bundle.getFullPathName());
+
+    const juce::PluginDescription* chosen = nullptr;
+    for (auto* t : types)
+        if (t->isInstrument) { chosen = t; break; }
+
+    if (chosen == nullptr)
+    {
+        if (done) done (juce::Result::fail (types.isEmpty() ? "Couldn't open " + bundle.getFileNameWithoutExtension() + "."
+                                                            : bundle.getFileNameWithoutExtension() + " isn't an instrument."));
+        return;
+    }
+
+    const auto description = *chosen;
+    const int generation = ++loadGeneration;
+    std::shared_ptr<juce::MemoryBlock> restore = stateToRestore != nullptr ? std::make_shared<juce::MemoryBlock> (*stateToRestore) : nullptr;
+    juce::WeakReference<WavetableMorpherProcessor> weak (this);
+
+    formatManager.createPluginInstanceAsync (description, currentSampleRate, currentBlockSize,
+        [weak, generation, bundle, description, restore, done] (std::unique_ptr<juce::AudioPluginInstance> instance, const juce::String& error)
+        {
+            auto* self = weak.get();
+            if (self == nullptr || generation != self->loadGeneration)
+                return; // processor gone, or the user picked something else meanwhile
+
+            if (instance == nullptr)
+            {
+                if (done) done (juce::Result::fail ("Couldn't load " + description.name + ": " + error));
+                return;
+            }
+
+            // Only the main stereo output is used.
+            auto layout = instance->getBusesLayout();
+            for (int i = 1; i < layout.outputBuses.size(); ++i)
+                layout.outputBuses.getReference (i) = juce::AudioChannelSet::disabled();
+            if (! layout.outputBuses.isEmpty())
+                layout.outputBuses.getReference (0) = juce::AudioChannelSet::stereo();
+            for (auto& in : layout.inputBuses)
+                in = juce::AudioChannelSet::disabled();
+            instance->setBusesLayout (layout); // if the synth refuses, it keeps its own layout - that's fine
+
+            if (restore != nullptr && restore->getSize() > 0)
+                instance->setStateInformation (restore->getData(), (int) restore->getSize());
+
+            self->unloadHostedSynth();
+
+            {
+                const juce::ScopedLock l1 (self->lifetimeLock);
+                const juce::ScopedLock l2 (self->hostLock);
+                self->hosted = std::move (instance);
+                self->hostedFile = bundle;
+                self->hostedIsVital = description.name.containsIgnoreCase ("vital")
+                                      || description.manufacturerName.containsIgnoreCase ("vital");
+                self->prepareHosted();
+                self->hostedActive = true;
+            }
+
+            self->lastSentVersion = restore != nullptr ? self->tableVersion.load() : -1;
+            self->heldNotes = 0;
+            if (done) done (juce::Result::ok());
+            self->sendChangeMessage();
+        });
+}
+
+void WavetableMorpherProcessor::unloadHostedSynth()
+{
+    if (hosted == nullptr)
+        return;
+
+    if (onHostedSynthWillChange)
+        onHostedSynthWillChange(); // closes the synth's window first
+
+    std::unique_ptr<juce::AudioPluginInstance> old;
+    {
+        const juce::ScopedLock l1 (lifetimeLock);
+        const juce::ScopedLock l2 (hostLock);
+        hostedActive = false;
+        old = std::move (hosted);
+        hostedFile = juce::File();
+        hostedIsVital = false;
+        setLatencySamples (0);
+    }
+
+    old->releaseResources();
+    old.reset();
+    sendChangeMessage();
+}
+
+juce::Result WavetableMorpherProcessor::sendToVital()
+{
+    if (hosted == nullptr || ! hostedIsVital)
+        return juce::Result::fail ("Load Vital first.");
+
+    const int version = tableVersion.load();
+    const auto frames = getMorphFrames();
+
+    juce::MemoryBlock current, updated;
+    hosted->getStateInformation (current);
+
+    auto r = wtm::vital::injectWavetable (current, frames, vitalOsc, tableName, updated);
+    if (r.failed())
+        return r;
+
+    {
+        const juce::ScopedLock sl (hostLock);
+        hosted->setStateInformation (updated.getData(), (int) updated.getSize());
+    }
+
+    lastSentVersion = version;
+    return juce::Result::ok();
+}
+
+juce::Result WavetableMorpherProcessor::writeDragFile (juce::File& result)
+{
+    const auto name = juce::File::createLegalFileName (tableName.trim().isNotEmpty() ? tableName.trim() : juce::String ("My Morph"));
+    result = getDestinationFolder (wtm::Destination::Library).getChildFile ("Dragged").getChildFile (name + ".wav");
+    return wtm::writeWavetableWav (result, getMorphFrames());
 }
 
 //==============================================================================

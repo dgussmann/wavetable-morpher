@@ -33,6 +33,34 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
 };
 
+/** Floating window that shows the loaded synth's own interface (Vital, Serum 2...). */
+class HostedSynthWindow : public juce::DocumentWindow
+{
+public:
+    HostedSynthWindow (juce::AudioProcessorEditor* synthEditor, const juce::String& title, std::function<void()> onClose);
+    void closeButtonPressed() override { if (onCloseRequested) onCloseRequested(); }
+
+private:
+    std::function<void()> onCloseRequested;
+};
+
+/** Drag this onto a synth's oscillator (Serum 2, Vital...) to load the current wavetable there. */
+class DragHandle : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    std::function<juce::Result (juce::File&)> prepareFile;
+    std::function<void (const juce::String&)> onStatus;
+
+    void paint (juce::Graphics& g) override;
+    void mouseEnter (const juce::MouseEvent&) override { repaint(); }
+    void mouseExit (const juce::MouseEvent&) override  { repaint(); }
+    void mouseDrag (const juce::MouseEvent& e) override;
+    void mouseUp (const juce::MouseEvent&) override    { dragging = false; }
+
+private:
+    bool dragging = false;
+};
+
 /** A rotary knob with its name underneath, attached to a parameter. */
 class LabelledKnob : public juce::Component
 {
@@ -63,6 +91,11 @@ private:
     void timerCallback() override;
 
     void refreshAll();
+    void refreshSynthControls();
+    void populateSynthMenu();
+    void synthChosen();
+    void openSynthWindow();
+    void closeSynthWindow();
     void setStatus (const juce::String& text, bool isError = false);
 
     void saveTable();
@@ -91,6 +124,16 @@ private:
     juce::TextButton swapButton { "Swap A / B" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> framesAttach, modeAttach, curveAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> normaliseAttach;
+
+    // Play-through synth
+    juce::Label playWithLabel;
+    juce::ComboBox synthBox, oscBox;
+    juce::TextButton openSynthButton { "Open Synth" }, sendButton { "Send to Vital" };
+    juce::ToggleButton autoSendToggle { "Auto-send" };
+    DragHandle dragHandle;
+    juce::Array<juce::File> synthFiles;
+    std::unique_ptr<HostedSynthWindow> synthWindow;
+    bool loadingSynth = false;
 
     // Result + preview
     wtm::WavetableView tableView;

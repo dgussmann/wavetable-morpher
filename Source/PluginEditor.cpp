@@ -237,6 +237,62 @@ void LabelledKnob::resized()
 }
 
 //==============================================================================
+HostedSynthWindow::HostedSynthWindow (juce::AudioProcessorEditor* synthEditor, const juce::String& title, std::function<void()> onClose)
+    : DocumentWindow (title, Colours::background, DocumentWindow::closeButton | DocumentWindow::minimiseButton),
+      onCloseRequested (std::move (onClose))
+{
+    setUsingNativeTitleBar (true);
+    setContentOwned (synthEditor, true);
+    setResizable (synthEditor->isResizable(), false);
+    setAlwaysOnTop (true); // keeps it in front of Ableton's main window
+    centreWithSize (getWidth(), getHeight());
+    setVisible (true);
+}
+
+void DragHandle::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    const bool over = isMouseOver (true);
+    g.setColour (Colours::accent.withAlpha (over ? 0.30f : 0.16f));
+    g.fillRoundedRectangle (r, 5.0f);
+    g.setColour (Colours::accent.withAlpha (0.7f));
+    g.drawRoundedRectangle (r, 5.0f, 1.0f);
+
+    // grip dots
+    g.setColour (Colours::text.withAlpha (0.8f));
+    for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 2; ++col)
+            g.fillEllipse (10.0f + (float) col * 5.0f, r.getCentreY() - 6.0f + (float) row * 5.0f, 2.6f, 2.6f);
+
+    g.setColour (Colours::text);
+    g.setFont (juce::FontOptions (12.5f));
+    g.drawText ("Drag to synth", getLocalBounds().withTrimmedLeft (26), juce::Justification::centredLeft);
+}
+
+void DragHandle::mouseDrag (const juce::MouseEvent& e)
+{
+    if (dragging || e.getDistanceFromDragStart() < 4 || ! prepareFile)
+        return;
+
+    dragging = true;
+    juce::File file;
+    const auto r = prepareFile (file);
+    if (r.failed())
+    {
+        if (onStatus) onStatus (r.getErrorMessage());
+        return;
+    }
+
+    juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, this,
+                                                                [safe = juce::Component::SafePointer<DragHandle> (this)]
+                                                                {
+                                                                    if (safe != nullptr) safe->dragging = false;
+                                                                });
+    if (onStatus)
+        onStatus ("Drop it on the oscillator's wavetable display in Serum or Vital.");
+}
+
+//==============================================================================
 WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     : AudioProcessorEditor (&p), proc (p),
       panelA (p, 0, Colours::accentA, "Oscillator A"),
@@ -340,6 +396,52 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     for (const auto& [id, name] : knobDefs)
         addAndMakeVisible (knobs.add (new LabelledKnob (proc.apvts, id, name)));
 
+    // Play-through synth ---------------------------------------------------
+    playWithLabel.setText ("Play with", juce::dontSendNotification);
+    styleLabel (playWithLabel, 13.0f, Colours::dimText);
+    addAndMakeVisible (playWithLabel);
+
+    synthBox.setTooltip ("Hear your wavetable in a real synth. Vital updates automatically; for Serum, use Drag to synth.");
+    synthBox.onChange = [this] { synthChosen(); };
+    addAndMakeVisible (synthBox);
+
+    openSynthButton.setTooltip ("Show the synth's own window, to shape the sound");
+    openSynthButton.onClick = [this] { openSynthWindow(); };
+    addAndMakeVisible (openSynthButton);
+
+    sendButton.setTooltip ("Put the current morph into Vital's oscillator now");
+    sendButton.onClick = [this]
+    {
+        const auto r = proc.sendToVital();
+        setStatus (r.wasOk() ? "Sent \"" + proc.getTableName() + "\" to Vital oscillator " + juce::String (proc.getVitalOscillator() + 1) + "."
+                             : r.getErrorMessage(), r.failed());
+        refreshSynthControls();
+    };
+    addAndMakeVisible (sendButton);
+
+    autoSendToggle.setTooltip ("Update Vital automatically whenever the morph changes (between notes)");
+    autoSendToggle.onClick = [this] { proc.setAutoSend (autoSendToggle.getToggleState()); };
+    addAndMakeVisible (autoSendToggle);
+
+    oscBox.addItemList ({ "Osc 1", "Osc 2", "Osc 3" }, 1);
+    oscBox.setTooltip ("Which Vital oscillator receives the wavetable");
+    oscBox.onChange = [this] { proc.setVitalOscillator (oscBox.getSelectedId() - 1); };
+    addAndMakeVisible (oscBox);
+
+    dragHandle.setTooltip ("Drag onto Serum 2's (or Vital's) oscillator display to load this wavetable");
+    dragHandle.prepareFile = [this] (juce::File& f) { return proc.writeDragFile (f); };
+    dragHandle.onStatus = [this] (const juce::String& s) { setStatus (s); };
+    addAndMakeVisible (dragHandle);
+
+    proc.onHostedSynthWillChange = [this] { closeSynthWindow(); };
+    proc.onVitalSent = [this] (const juce::String& error)
+    {
+        if (error.isNotEmpty()) setStatus (error, true);
+        else setStatus ("Vital updated: \"" + proc.getTableName() + "\" is in oscillator " + juce::String (proc.getVitalOscillator() + 1) + ".");
+        refreshSynthControls();
+    };
+    populateSynthMenu();
+
     keyboard.setLowestVisibleKey (36);
     keyboard.setKeyWidth (22.0f);
     keyboard.setColour (juce::MidiKeyboardComponent::keyDownOverlayColourId, Colours::accent.withAlpha (0.6f));
@@ -354,13 +456,16 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     tableView.setFrames (proc.getMorphFrames());
 
     setResizable (true, true);
-    setResizeLimits (900, 680, 1600, 1100);
-    setSize (1000, 720);
+    setResizeLimits (940, 720, 1600, 1100);
+    setSize (1020, 770);
     startTimerHz (30);
 }
 
 WavetableMorpherEditor::~WavetableMorpherEditor()
 {
+    proc.onHostedSynthWillChange = nullptr;
+    proc.onVitalSent = nullptr;
+    closeSynthWindow();
     proc.removeChangeListener (this);
     setLookAndFeel (nullptr);
 }
@@ -438,8 +543,22 @@ void WavetableMorpherEditor::resized()
 
     r.removeFromTop (12);
 
-    // Wavetable view + preview knobs
+    // Wavetable view + synth row + preview knobs
     auto knobArea = r.removeFromBottom (92);
+    r.removeFromBottom (6);
+    auto synthRow = r.removeFromBottom (28);
+    playWithLabel.setBounds (synthRow.removeFromLeft (66));
+    synthBox.setBounds (synthRow.removeFromLeft (220));
+    synthRow.removeFromLeft (8);
+    openSynthButton.setBounds (synthRow.removeFromLeft (96));
+    synthRow.removeFromLeft (16);
+    dragHandle.setBounds (synthRow.removeFromRight (140));
+    synthRow.removeFromRight (16);
+    sendButton.setBounds (synthRow.removeFromLeft (110));
+    synthRow.removeFromLeft (8);
+    oscBox.setBounds (synthRow.removeFromLeft (80));
+    synthRow.removeFromLeft (8);
+    autoSendToggle.setBounds (synthRow.removeFromLeft (96));
     previewTitle.setBounds (knobArea.removeFromLeft (80).withTrimmedTop (8));
     const int kw = knobArea.getWidth() / std::max (1, knobs.size());
     for (auto* k : knobs)
@@ -465,6 +584,152 @@ void WavetableMorpherEditor::refreshAll()
 
     if (! nameEditor.hasKeyboardFocus (true) && nameEditor.getText() != proc.getTableName())
         nameEditor.setText (proc.getTableName(), false);
+
+    refreshSynthControls();
+}
+
+//==============================================================================
+void WavetableMorpherEditor::populateSynthMenu()
+{
+    synthFiles = proc.findSynthPlugins();
+    synthBox.clear (juce::dontSendNotification);
+    synthBox.addItem ("Built-in preview synth", 1);
+    synthBox.addSeparator();
+
+    for (int i = 0; i < synthFiles.size(); ++i)
+        synthBox.addItem (synthFiles.getReference (i).getFileNameWithoutExtension(), 100 + i);
+
+    if (synthFiles.isEmpty())
+        synthBox.addItem ("(no VST3 plugins found)", 3), synthBox.setItemEnabled (3, false);
+
+    synthBox.addSeparator();
+    synthBox.addItem ("Rescan plugins", 2);
+    refreshSynthControls();
+}
+
+void WavetableMorpherEditor::refreshSynthControls()
+{
+    const auto file = proc.getHostedSynthFile();
+    const bool hosted = proc.getHostedSynth() != nullptr;
+    const bool vital = proc.isHostedVital();
+
+    if (! loadingSynth)
+    {
+        int id = 1;
+        if (hosted)
+        {
+            const int index = synthFiles.indexOf (file);
+            if (index >= 0) id = 100 + index;
+            else
+            {
+                // Loaded from a saved project but not in the list (e.g. moved): show it anyway.
+                synthFiles.add (file);
+                synthBox.addItem (file.getFileNameWithoutExtension(), 100 + synthFiles.size() - 1);
+                id = 100 + synthFiles.size() - 1;
+            }
+        }
+        synthBox.setSelectedId (id, juce::dontSendNotification);
+    }
+
+    openSynthButton.setEnabled (hosted);
+    sendButton.setVisible (vital);
+    oscBox.setVisible (vital);
+    autoSendToggle.setVisible (vital);
+    oscBox.setSelectedId (proc.getVitalOscillator() + 1, juce::dontSendNotification);
+    autoSendToggle.setToggleState (proc.getAutoSend(), juce::dontSendNotification);
+    sendButton.setButtonText (vital && proc.isVitalUpToDate() ? juce::String::fromUTF8 ("Sent \xe2\x9c\x93") : juce::String ("Send to Vital"));
+
+    // The built-in synth's knobs do nothing while a real synth is playing.
+    for (auto* k : knobs)
+        k->setEnabled (! hosted);
+    previewTitle.setText (hosted ? "Built-in" : "Preview", juce::dontSendNotification);
+}
+
+void WavetableMorpherEditor::synthChosen()
+{
+    const int id = synthBox.getSelectedId();
+
+    if (id == 2) // rescan
+    {
+        populateSynthMenu();
+        setStatus ("Found " + juce::String (synthFiles.size()) + " VST3 plugins.");
+        return;
+    }
+
+    if (id == 1)
+    {
+        proc.unloadHostedSynth();
+        setStatus ("Using the built-in preview synth.");
+        refreshSynthControls();
+        return;
+    }
+
+    const int index = id - 100;
+    if (! juce::isPositiveAndBelow (index, synthFiles.size()))
+        return;
+
+    const auto file = synthFiles.getReference (index);
+    if (file == proc.getHostedSynthFile())
+        return;
+
+    loadingSynth = true;
+    setStatus ("Loading " + file.getFileNameWithoutExtension() + "...");
+
+    juce::Component::SafePointer<WavetableMorpherEditor> safe (this);
+    proc.loadHostedSynth (file, [safe, file] (juce::Result r)
+    {
+        if (safe == nullptr)
+            return;
+
+        safe->loadingSynth = false;
+        if (r.failed())
+        {
+            safe->setStatus (r.getErrorMessage(), true);
+            safe->refreshSynthControls();
+            return;
+        }
+
+        const auto name = file.getFileNameWithoutExtension();
+        safe->setStatus (safe->proc.isHostedVital()
+                             ? "Playing through Vital. Your morph goes into oscillator " + juce::String (safe->proc.getVitalOscillator() + 1)
+                                   + " automatically - play a note, and use Vital's Position knob to scan it."
+                             : "Playing through " + name + ". Drag the wavetable onto " + name + "'s oscillator using \"Drag to synth\".");
+        safe->refreshSynthControls();
+        safe->openSynthWindow();
+    });
+}
+
+void WavetableMorpherEditor::openSynthWindow()
+{
+    auto* synth = proc.getHostedSynth();
+    if (synth == nullptr)
+        return;
+
+    if (synthWindow != nullptr)
+    {
+        synthWindow->setVisible (true);
+        synthWindow->toFront (true);
+        return;
+    }
+
+    auto* ed = synth->createEditorAndMakeActive();
+    if (ed == nullptr)
+    {
+        setStatus (synth->getName() + " has no window to show.", true);
+        return;
+    }
+
+    juce::Component::SafePointer<WavetableMorpherEditor> safe (this);
+    synthWindow = std::make_unique<HostedSynthWindow> (ed, synth->getName() + "  -  Wavetable Morpher", [safe]
+    {
+        // Close later: the window can't delete itself inside its own button callback.
+        juce::MessageManager::callAsync ([safe] { if (safe != nullptr) safe->closeSynthWindow(); });
+    });
+}
+
+void WavetableMorpherEditor::closeSynthWindow()
+{
+    synthWindow.reset(); // deletes the synth's editor before the synth itself can go away
 }
 
 void WavetableMorpherEditor::timerCallback()

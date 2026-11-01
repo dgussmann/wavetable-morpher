@@ -8,6 +8,7 @@
 #include "PreviewSynth.h"
 #include "WavetableEngine.h"
 #include "WavetableExporter.h"
+#include "VitalBridge.h"
 
 namespace ParamIDs
 {
@@ -51,7 +52,7 @@ public:
 
     //==============================================================================
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
-    void releaseResources() override {}
+    void releaseResources() override;
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
@@ -101,6 +102,36 @@ public:
     bool isDestinationEnabled (wtm::Destination d);
     void setDestinationEnabled (wtm::Destination d, bool enabled);
 
+    //============================================================================== hosted synth (message thread)
+    /** VST3 instruments installed on this Mac (Vital and Serum first). */
+    juce::Array<juce::File> findSynthPlugins() const;
+
+    /** Loads a VST3 synth to play the wavetable through. `done` is called on the message thread. */
+    void loadHostedSynth (const juce::File& bundle, std::function<void (juce::Result)> done,
+                          const juce::MemoryBlock* stateToRestore = nullptr);
+    void unloadHostedSynth();
+
+    juce::AudioPluginInstance* getHostedSynth() const noexcept { return hosted.get(); }
+    juce::File getHostedSynthFile() const { return hostedFile; }
+    juce::String getHostedSynthName() const { return hosted != nullptr ? hosted->getName() : juce::String(); }
+    bool isHostedVital() const noexcept { return hostedIsVital; }
+
+    /** Puts the current morph into the chosen oscillator of the loaded Vital. */
+    juce::Result sendToVital();
+    int getVitalOscillator() const noexcept { return vitalOsc; }
+    void setVitalOscillator (int i) { vitalOsc = juce::jlimit (0, 2, i); lastSentVersion = -1; }
+    bool getAutoSend() const noexcept { return autoSend; }
+    void setAutoSend (bool b) { autoSend = b; }
+    bool isVitalUpToDate() const noexcept { return lastSentVersion == tableVersion.load(); }
+
+    /** Writes the current morph to a WAV for dragging onto a synth. */
+    juce::Result writeDragFile (juce::File& result);
+
+    /** The editor uses this to close the synth's window before the synth is removed. */
+    std::function<void()> onHostedSynthWillChange;
+    /** Called (message thread) after Vital was updated automatically, with an error or empty string. */
+    std::function<void (const juce::String&)> onVitalSent;
+
     juce::MidiKeyboardState keyboardState;
     juce::AudioProcessorValueTreeState apvts;
 
@@ -142,6 +173,30 @@ private:
     std::atomic<float> displayPosition { 0.0f };
 
     std::unique_ptr<juce::PropertiesFile> settingsFile;
+
+    // Hosted synth
+    void prepareHosted();
+    juce::AudioPluginFormatManager formatManager;
+    std::unique_ptr<juce::AudioPluginInstance> hosted;
+    juce::File hostedFile;
+    bool hostedIsVital = false;
+    std::atomic<bool> hostedActive { false };
+    juce::CriticalSection hostLock;      // audio thread vs. swapping / Vital updates
+    juce::CriticalSection lifetimeLock;  // state saving vs. unloading
+    juce::AudioBuffer<float> hostBuffer;
+    int currentBlockSize = 512;
+    bool prepared = false;
+    int loadGeneration = 0;
+
+    // Vital auto-send
+    int vitalOsc = 0;
+    bool autoSend = true;
+    std::atomic<int> tableVersion { 0 };
+    int lastSentVersion = -1;
+    std::atomic<double> lastTableChangeMs { 0.0 };
+    std::atomic<int> heldNotes { 0 };
+
+    JUCE_DECLARE_WEAK_REFERENCEABLE (WavetableMorpherProcessor)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WavetableMorpherProcessor)
 };
