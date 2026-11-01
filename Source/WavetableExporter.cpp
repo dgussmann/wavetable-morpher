@@ -213,6 +213,22 @@ namespace wtm
         return {};
     }
 
+    juce::File detectPresetFolder (Destination d)
+    {
+        if (d == Destination::Serum2)
+        {
+            const auto tables = detectBrowseFolder (Destination::Serum2);         // .../Serum 2 Presets/Tables
+            return tables == juce::File() ? juce::File()
+                                          : tables.getParentDirectory().getChildFile ("Presets").getChildFile ("User").getChildFile ("Wavetable Morpher");
+        }
+        if (d == Destination::Vital)
+        {
+            const auto data = findVitalDataDirectory();
+            return data == juce::File() ? juce::File() : data.getChildFile ("User").getChildFile ("Presets");
+        }
+        return {};
+    }
+
     juce::Array<juce::File> audioFilesIn (const juce::File& folder)
     {
         auto files = folder.findChildFiles (juce::File::findFiles, false, audioWildcard());

@@ -539,6 +539,14 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     soloToggle.setTooltip ("Switch off the synth's other oscillators (and noise / sub / sample) so you hear only this wavetable");
     soloToggle.onClick = [this] { proc.setSolo (soloToggle.getToggleState()); };
     addAndMakeVisible (soloToggle);
+
+    savePatchToggle.setTooltip ("Save Wavetable also saves the synth's current sound as a preset (with your wavetable) in its own preset browser");
+    savePatchToggle.onClick = [this]
+    {
+        proc.setSavePatch (savePatchToggle.getToggleState());
+        saveButton.setButtonText (proc.canSendToSynth() && proc.getSavePatch() ? "Save Table + Patch" : "Save Wavetable");
+    };
+    addAndMakeVisible (savePatchToggle);
     oscBox.onChange = [this] { proc.setVitalOscillator (oscBox.getSelectedId() - 1); };
     addAndMakeVisible (oscBox);
 
@@ -691,18 +699,19 @@ void WavetableMorpherEditor::resized()
    #endif
     auto synthRow = r.removeFromBottom (28);
     playWithLabel.setBounds (synthRow.removeFromLeft (62));
-    synthBox.setBounds (synthRow.removeFromLeft (190));
+    synthBox.setBounds (synthRow.removeFromLeft (160));
     synthRow.removeFromLeft (8);
     openSynthButton.setBounds (synthRow.removeFromLeft (92));
     synthRow.removeFromLeft (14);
-    dragHandle.setBounds (synthRow.removeFromRight (132));
+    dragHandle.setBounds (synthRow.removeFromRight (126));
     synthRow.removeFromRight (12);
-    sendButton.setBounds (synthRow.removeFromLeft (124));
+    sendButton.setBounds (synthRow.removeFromLeft (112));
     synthRow.removeFromLeft (8);
     oscBox.setBounds (synthRow.removeFromLeft (84));
     synthRow.removeFromLeft (8);
-    autoSendToggle.setBounds (synthRow.removeFromLeft (92));
-    soloToggle.setBounds (synthRow.removeFromLeft (64));
+    autoSendToggle.setBounds (synthRow.removeFromLeft (90));
+    soloToggle.setBounds (synthRow.removeFromLeft (58));
+    savePatchToggle.setBounds (synthRow.removeFromLeft (100));
 
     r.removeFromBottom (8);
     frameScrub.setBounds (r.removeFromBottom (24));
@@ -800,6 +809,9 @@ void WavetableMorpherEditor::refreshSynthControls()
     oscBox.setSelectedId (proc.getVitalOscillator() + 1, juce::dontSendNotification);
     soloToggle.setVisible (vital);
     soloToggle.setToggleState (proc.getSolo(), juce::dontSendNotification);
+    savePatchToggle.setVisible (vital);
+    savePatchToggle.setToggleState (proc.getSavePatch(), juce::dontSendNotification);
+    saveButton.setButtonText (vital && proc.getSavePatch() ? "Save Table + Patch" : "Save Wavetable");
     autoSendToggle.setToggleState (proc.getAutoSend(), juce::dontSendNotification);
     sendButton.setButtonText (vital && proc.isVitalUpToDate() ? juce::String::fromUTF8 ("Sent \xe2\x9c\x93") : "Send to " + proc.getHostedShortName());
 
@@ -1044,6 +1056,8 @@ void WavetableMorpherEditor::saveTable()
     for (auto d : sendTargets())
         if (proc.isDestinationEnabled (d) && proc.getDestinationFolder (d).getChildFile (fileName).existsAsFile())
             existing.add (destinationName (d));
+    if (proc.canSendToSynth() && proc.getSavePatch() && proc.synthPatchFile (name).existsAsFile())
+        existing.add (proc.getHostedShortName() + " patches");
 
     if (existing.isEmpty())
     {
@@ -1085,9 +1099,22 @@ void WavetableMorpherEditor::writeAll (const std::vector<Cycle>& frames, const j
     }
 
     const auto name = fileName.upToLastOccurrenceOf (".", false, false);
+
+    // The synth's sound, as a preset in its own browser
+    if (proc.canSendToSynth() && proc.getSavePatch())
+    {
+        juce::File patch;
+        const auto r = proc.saveSynthPatch (proc.getTableName(), patch);
+        if (r.wasOk()) saved.add (proc.getHostedShortName() + " patch");
+        else           problems.add (proc.getHostedShortName() + " patch: " + r.getErrorMessage());
+    }
+
     if (! saved.isEmpty())
         setStatus ("Saved \"" + name + "\" (" + juce::String ((int) frames.size()) + " frames) to " + saved.joinIntoString (", ")
-                   + ". If it doesn't show in your synth yet, reopen its wavetable browser.");
+                   + ". If it doesn't show in your synth yet, reopen its browser"
+                   + (proc.canSendToSynth() && proc.getSavePatch()
+                          ? juce::String (proc.isHostedSerum() ? " (the patch is in User / Wavetable Morpher)." : " (the patch is under User).")
+                          : juce::String (".")));
 
     if (! problems.isEmpty())
     {

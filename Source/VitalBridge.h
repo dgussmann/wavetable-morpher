@@ -34,6 +34,10 @@ namespace wtm::vital
     juce::Result renderWavetable (const juce::MemoryBlock& state, int oscillatorIndex,
                                   std::vector<Cycle>& frames, juce::String& name, juce::String& note);
 
+    /** A .vital preset file (JSON) made from Vital's current state, named `presetName`.
+        Vital presets embed their wavetables, so the table travels with the preset. */
+    juce::Result makePreset (const juce::MemoryBlock& state, const juce::String& presetName, juce::String& presetJson);
+
     /** The "author" of an oscillator's wavetable ("Wavetable Morpher" when it's one we sent). */
     juce::String tableAuthor (const juce::MemoryBlock& state, int oscillatorIndex);
 

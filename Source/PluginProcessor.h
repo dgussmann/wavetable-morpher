@@ -164,6 +164,13 @@ public:
     /** Uses the loaded synth's oscillator-1 wavetable as a source for oscillator A or B. */
     void useSynthTable (int slot, int frameIndex);
 
+    /** Saves the loaded synth's current sound - with the playing wavetable - as a preset in that synth's
+        own preset browser (Serum 2: .SerumPreset, Vital: .vital). Returns the file written in `written`. */
+    juce::Result saveSynthPatch (const juce::String& name, juce::File& written);
+    juce::File synthPatchFile (const juce::String& name) const;
+    bool getSavePatch() const noexcept { return savePatch; }
+    void setSavePatch (bool b) { savePatch = b; }
+
     /** Writes the current morph to a WAV for dragging onto a synth. */
     juce::Result writeDragFile (juce::File& result);
 
@@ -227,7 +234,7 @@ private:
     std::unique_ptr<juce::AudioPluginInstance> hosted;
     juce::File hostedFile;
     bool hostedIsVital = false, hostedIsSerum = false;
-    bool solo = true;
+    bool solo = true, savePatch = true;
     bool restoringSynth = false, loadingHosted = false;
     int serumSendCounter = 0;
     juce::Result sendToVitalNow (const std::vector<wtm::Cycle>& frames);

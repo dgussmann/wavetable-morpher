@@ -29,6 +29,9 @@ namespace wtm
     /** Top folder of a synth's wavetables, for browsing when importing (empty if not found). */
     juce::File detectBrowseFolder (Destination d);
 
+    /** Where saved synth patches go: Serum 2 -> Presets/User/Wavetable Morpher, Vital -> User/Presets. */
+    juce::File detectPresetFolder (Destination d);
+
     /** WAV/AIFF/FLAC files directly inside a folder, sorted the way Finder sorts them. */
     juce::Array<juce::File> audioFilesIn (const juce::File& folder);
     inline const char* audioWildcard() { return "*.wav;*.aif;*.aiff;*.flac"; }

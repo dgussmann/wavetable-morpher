@@ -425,6 +425,26 @@ namespace wtm::vital
         return juce::Result::ok();
     }
 
+    juce::Result makePreset (const juce::MemoryBlock& state, const juce::String& presetName, juce::String& presetJson)
+    {
+        ParsedState parsed;
+        auto r = parseState (state, parsed);
+        if (r.failed())
+            return r;
+
+        if (auto* obj = parsed.root.getDynamicObject())
+        {
+            obj->setProperty ("preset_name", presetName);
+            if (obj->getProperty ("author").toString().isEmpty())
+                obj->setProperty ("author", "Wavetable Morpher");
+            if (! obj->hasProperty ("preset_style"))
+                obj->setProperty ("preset_style", "");
+        }
+
+        presetJson = juce::JSON::toString (parsed.root, true);
+        return juce::Result::ok();
+    }
+
     juce::String tableAuthor (const juce::MemoryBlock& state, int osc)
     {
         ParsedState parsed;

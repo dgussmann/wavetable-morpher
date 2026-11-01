@@ -205,27 +205,42 @@ namespace wtm::serum
             return juce::Result::ok();
         }
 
-        juce::MemoryBlock rebuild (const Parsed& parsed, const juce::MemoryBlock& newCbor)
+        /** Replaces the string value of "key" in a flat JSON header (keeps everything else byte-for-byte). */
+        juce::String setJsonString (const juce::String& json, const juce::String& key, const juce::String& value)
         {
-            // Compress the edited document
+            const auto needle = "\"" + key + "\"";
+            const int k = json.indexOf (needle);
+            if (k < 0)
+                return json;
+
+            const int colon = json.indexOfChar (k + needle.length(), ':');
+            const int q1 = colon >= 0 ? json.indexOfChar (colon, '"') : -1;
+            if (q1 < 0)
+                return json;
+
+            int q2 = q1 + 1;
+            for (; q2 < json.length(); ++q2)
+            {
+                if (json[q2] == '\\') { ++q2; continue; }
+                if (json[q2] == '"') break;
+            }
+            if (q2 >= json.length())
+                return json;
+
+            return json.substring (0, q1) + juce::JSON::toString (juce::var (value)) + json.substring (q2 + 1);
+        }
+
+        /** "XferJson" header + compressed document, i.e. exactly a .SerumPreset file. */
+        juce::MemoryBlock buildPayload (const Parsed& parsed, const juce::MemoryBlock& newCbor, const juce::String& newPresetName = {})
+        {
             juce::MemoryBlock z (ZSTD_compressBound (newCbor.getSize()));
             const auto zSize = ZSTD_compress (z.getData(), z.getSize(), newCbor.getData(), newCbor.getSize(), 3);
             z.setSize (ZSTD_isError (zSize) ? 0 : zSize);
 
             // Header "hash" is the MD5 of the compressed data
-            auto json = parsed.headerJson;
-            const auto hash = juce::MD5 (z.getData(), z.getSize()).toHexString();
-            const int h = json.indexOf ("\"hash\"");
-            if (h >= 0)
-            {
-                const int q1 = json.indexOfChar (h + 6, '"');
-                const int q2 = q1 >= 0 ? json.indexOfChar (q1 + 1, '"') : -1;
-                if (q1 >= 0 && q2 > q1)
-                    json = json.substring (0, q1 + 1) + hash + json.substring (q2);
-            }
-
-            const auto& comp = parsed.envelope.component;
-            const auto* b = static_cast<const char*> (comp.getData());
+            auto json = setJsonString (parsed.headerJson, "hash", juce::MD5 (z.getData(), z.getSize()).toHexString());
+            if (newPresetName.isNotEmpty())
+                json = setJsonString (json, "presetName", newPresetName);
 
             juce::MemoryOutputStream payload;
             payload.write (kMagic, 8);
@@ -235,14 +250,22 @@ namespace wtm::serum
             payload.writeInt ((int) newCbor.getSize());
             payload.writeInt ((int) parsed.version);
             payload.write (z.getData(), z.getSize());
+            return payload.getMemoryBlock();
+        }
+
+        juce::MemoryBlock rebuild (const Parsed& parsed, const juce::MemoryBlock& newCbor)
+        {
+            const auto payload = buildPayload (parsed, newCbor);
+            const auto& comp = parsed.envelope.component;
+            const auto* b = static_cast<const char*> (comp.getData());
 
             juce::MemoryBlock prefix (b, parsed.magicAt);
             const auto oldPayload = (juce::int64) parsed.endOfFrame - (juce::int64) parsed.magicAt;
-            state::fixRemainingSizeFields (prefix, (juce::int64) comp.getSize(), (juce::int64) payload.getDataSize() - oldPayload);
+            state::fixRemainingSizeFields (prefix, (juce::int64) comp.getSize(), (juce::int64) payload.getSize() - oldPayload);
 
             juce::MemoryBlock newComp;
             newComp.append (prefix.getData(), prefix.getSize());
-            newComp.append (payload.getData(), payload.getDataSize());
+            newComp.append (payload.getData(), payload.getSize());
             newComp.append (b + parsed.endOfFrame, comp.getSize() - parsed.endOfFrame);
 
             return state::rewrapHost (parsed.envelope, newComp);
@@ -288,6 +311,45 @@ namespace wtm::serum
         return juce::Result::ok();
     }
 
+    namespace
+    {
+        struct Edit { size_t start, end; juce::MemoryBlock bytes; };
+
+        juce::Result editDocument (const Parsed& parsed, int osc, const juce::String& relativePath, int numSamples,
+                                   const juce::String& presetName, juce::MemoryBlock& doc)
+        {
+            const Cbor cbor { static_cast<const juce::uint8*> (parsed.cbor.getData()), parsed.cbor.getSize() };
+            std::vector<Edit> edits;
+
+            size_t s = 0, e = 0;
+            if (! cbor.find (0, pathFor (osc, "relativePathToWT"), 0, s, e))
+                return juce::Result::fail ("Serum's oscillator " + juce::String::charToString ((juce::juce_wchar) ('A' + osc))
+                                           + " isn't a wavetable oscillator in this patch. Set it to Wavetable mode in Serum and try again.");
+            edits.push_back ({ s, e, encodeText (relativePath) });
+
+            if (cbor.find (0, pathFor (osc, "numFrames"), 0, s, e))
+                edits.push_back ({ s, e, encodeUInt ((juce::uint64) numSamples) });
+
+            if (presetName.isNotEmpty() && cbor.find (0, { "presetName" }, 0, s, e))
+                edits.push_back ({ s, e, encodeText (presetName) });
+
+            // Apply from the end so earlier offsets stay valid. (CBOR maps count entries, not bytes,
+            // so replacing a value with one of a different length needs no other changes.)
+            std::sort (edits.begin(), edits.end(), [] (const Edit& a, const Edit& b) { return a.start > b.start; });
+
+            doc = parsed.cbor;
+            for (const auto& ed : edits)
+            {
+                juce::MemoryBlock next;
+                next.append (doc.getData(), ed.start);
+                next.append (ed.bytes.getData(), ed.bytes.getSize());
+                next.append (static_cast<const char*> (doc.getData()) + ed.end, doc.getSize() - ed.end);
+                doc = std::move (next);
+            }
+            return juce::Result::ok();
+        }
+    }
+
     juce::Result setOscillatorWavetable (const juce::MemoryBlock& state, int osc, const juce::String& relativePath,
                                          int numSamples, juce::MemoryBlock& newState)
     {
@@ -296,35 +358,29 @@ namespace wtm::serum
         if (r.failed())
             return r;
 
-        const Cbor cbor { static_cast<const juce::uint8*> (parsed.cbor.getData()), parsed.cbor.getSize() };
-
-        struct Edit { size_t start, end; juce::MemoryBlock bytes; };
-        std::vector<Edit> edits;
-
-        size_t s = 0, e = 0;
-        if (! cbor.find (0, pathFor (osc, "relativePathToWT"), 0, s, e))
-            return juce::Result::fail ("Serum's oscillator " + juce::String::charToString ((juce::juce_wchar) ('A' + osc))
-                                       + " isn't a wavetable oscillator in this patch. Set it to Wavetable mode in Serum and try again.");
-        edits.push_back ({ s, e, encodeText (relativePath) });
-
-        if (cbor.find (0, pathFor (osc, "numFrames"), 0, s, e))
-            edits.push_back ({ s, e, encodeUInt ((juce::uint64) numSamples) });
-
-        // Apply from the end so earlier offsets stay valid. (CBOR maps count entries, not bytes,
-        // so replacing a value with one of a different length needs no other changes.)
-        std::sort (edits.begin(), edits.end(), [] (const Edit& a, const Edit& b) { return a.start > b.start; });
-
-        juce::MemoryBlock doc (parsed.cbor);
-        for (const auto& ed : edits)
-        {
-            juce::MemoryBlock next;
-            next.append (doc.getData(), ed.start);
-            next.append (ed.bytes.getData(), ed.bytes.getSize());
-            next.append (static_cast<const char*> (doc.getData()) + ed.end, doc.getSize() - ed.end);
-            doc = std::move (next);
-        }
+        juce::MemoryBlock doc;
+        r = editDocument (parsed, osc, relativePath, numSamples, {}, doc);
+        if (r.failed())
+            return r;
 
         newState = rebuild (parsed, doc);
+        return juce::Result::ok();
+    }
+
+    juce::Result makePreset (const juce::MemoryBlock& state, int osc, const juce::String& relativePath, int numSamples,
+                             const juce::String& presetName, juce::MemoryBlock& presetFile)
+    {
+        Parsed parsed;
+        auto r = parse (state, parsed);
+        if (r.failed())
+            return r;
+
+        juce::MemoryBlock doc;
+        r = editDocument (parsed, osc, relativePath, numSamples, presetName, doc);
+        if (r.failed())
+            return r;
+
+        presetFile = buildPayload (parsed, doc, presetName);
         return juce::Result::ok();
     }
 }

@@ -20,6 +20,11 @@ namespace wtm::serum
     juce::Result getOscillatorWavetable (const juce::MemoryBlock& state, int osc,
                                          juce::String& relativePath, int& numSamples);
 
+    /** A .SerumPreset file made from Serum's current state: oscillator `osc` points at `relativePath`
+        and the preset is named `presetName`. Everything else (filters, FX, modulation...) is kept. */
+    juce::Result makePreset (const juce::MemoryBlock& state, int osc, const juce::String& relativePath, int numSamples,
+                             const juce::String& presetName, juce::MemoryBlock& presetFile);
+
     /** Whether this looks like Serum 2 data at all. */
     bool looksLikeSerumState (const juce::MemoryBlock& state);
 }

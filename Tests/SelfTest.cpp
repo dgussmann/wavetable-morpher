@@ -280,6 +280,10 @@ int main (int argc, char** argv)
         std::vector<int> pos; std::vector<Cycle> got; juce::String name;
         check (vital::readWavetable (out, 1, pos, got, name).wasOk() && got.size() == 256 && name == "Real Test", "REAL: read back osc 2");
         outDir.getChildFile ("real_out.bin").replaceWithData (out.getData(), out.getSize());
+
+        juce::String vitalPreset;
+        check (vital::makePreset (out, "Real Test Patch", vitalPreset).wasOk(), "REAL Vital: make a .vital preset");
+        outDir.getChildFile ("made.vital").replaceWithText (vitalPreset);
     }
     if (argc > 3)
     {
@@ -317,6 +321,11 @@ int main (int argc, char** argv)
         serum::getOscillatorWavetable (preset, 1, p1, s1);
         check (p3 == p1 && s3 == s1, "REAL Serum: osc B untouched (" + p3 + ")");
         outDir.getChildFile ("serum_out.bin").replaceWithData (out.getData(), out.getSize());
+
+        juce::MemoryBlock presetFile;
+        check (serum::makePreset (preset, 0, "Wavetable Morpher/My \"Quoted\" Morph.wav", 64 * 2048, "My \"Quoted\" Morph", presetFile).wasOk(),
+               "REAL Serum: make a .SerumPreset");
+        outDir.getChildFile ("made.SerumPreset").replaceWithData (presetFile.getData(), presetFile.getSize());
 
         // Same, wrapped the way a VST3 host returns it
         juce::XmlElement xml ("VST3PluginState");

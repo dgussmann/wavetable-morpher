@@ -614,6 +614,7 @@ void WavetableMorpherProcessor::getStateInformation (juce::MemoryBlock& destData
         juce::ValueTree host ("HOST");
         host.setProperty ("vitalOsc", vitalOsc, nullptr);
         host.setProperty ("solo", solo, nullptr);
+        host.setProperty ("savePatch", savePatch, nullptr);
         host.setProperty ("autoSend", autoSend, nullptr);
         host.setProperty ("playSource", (int) playSource, nullptr);
 
@@ -652,6 +653,7 @@ void WavetableMorpherProcessor::setStateInformation (const void* data, int sizeI
     {
         vitalOsc = juce::jlimit (0, 2, (int) host.getProperty ("vitalOsc", 0));
         solo = (bool) host.getProperty ("solo", true);
+        savePatch = (bool) host.getProperty ("savePatch", true);
         autoSend = (bool) host.getProperty ("autoSend", true);
         playSource = (PlaySource) juce::jlimit (0, 2, (int) host.getProperty ("playSource", 1));
 
@@ -943,6 +945,68 @@ juce::Result WavetableMorpherProcessor::sendToSerumNow (const std::vector<wtm::C
         old.getReference (i).deleteFile();
 
     return juce::Result::ok();
+}
+
+juce::File WavetableMorpherProcessor::synthPatchFile (const juce::String& name) const
+{
+    const auto legal = juce::File::createLegalFileName (name.trim());
+    if (hostedIsSerum) return wtm::detectPresetFolder (wtm::Destination::Serum2).getChildFile (legal + ".SerumPreset");
+    if (hostedIsVital) return wtm::detectPresetFolder (wtm::Destination::Vital).getChildFile (legal + ".vital");
+    return {};
+}
+
+juce::Result WavetableMorpherProcessor::saveSynthPatch (const juce::String& name, juce::File& written)
+{
+    if (hosted == nullptr || ! canSendToSynth())
+        return juce::Result::fail ("Load Serum 2 or Vital to save a patch.");
+
+    written = synthPatchFile (name);
+    if (written == juce::File())
+        return juce::Result::fail ("Couldn't find " + getHostedShortName() + "'s preset folder.");
+    if (! written.getParentDirectory().isDirectory() && written.getParentDirectory().createDirectory().failed())
+        return juce::Result::fail ("Couldn't create " + written.getParentDirectory().getFullPathName());
+
+    // Make sure the synth has the current table (and Solo) before capturing its sound.
+    if (lastSentVersion != tableVersion.load())
+    {
+        auto r = sendToSynth();
+        if (r.failed())
+            return r;
+    }
+
+    juce::MemoryBlock state;
+    hosted->getStateInformation (state);
+
+    if (hostedIsVital)
+    {
+        juce::String json;
+        auto r = wtm::vital::makePreset (state, name, json);
+        if (r.failed())
+            return r;
+        return written.replaceWithText (json) ? juce::Result::ok()
+                                              : juce::Result::fail ("Couldn't write " + written.getFullPathName());
+    }
+
+    // Serum: the preset must point at a table file that stays put, so save one next to Serum's tables.
+    const auto frames = getPlayFrames();
+    const auto tables = wtm::detectBrowseFolder (wtm::Destination::Serum2);
+    const auto legal = juce::File::createLegalFileName (name.trim());
+    const auto tableFile = tables.getChildFile ("Wavetable Morpher").getChildFile (legal + ".wav");
+    auto r = wtm::writeWavetableWav (tableFile, frames);
+    if (r.failed())
+        return r;
+
+    juce::MemoryBlock preset;
+    r = wtm::serum::makePreset (state, vitalOsc, "Wavetable Morpher/" + tableFile.getFileName(),
+                                (int) frames.size() * wtm::kFrameSize, name, preset);
+    if (r.failed())
+    {
+        saveDiagnostic (state, "serum-preset-error");
+        return r;
+    }
+
+    return written.replaceWithData (preset.getData(), preset.getSize()) ? juce::Result::ok()
+                                                                          : juce::Result::fail ("Couldn't write " + written.getFullPathName());
 }
 
 void WavetableMorpherProcessor::applySerumSolo()
