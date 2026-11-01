@@ -4,10 +4,105 @@ namespace wtm::vital
 {
     namespace
     {
+        constexpr juce::uint32 kHostXmlMagic = 0x21324356; // "VC2!" written by juce::AudioProcessor::copyXmlToBinary
+
+        //==============================================================================
+        /** Layer 1: the JUCE VST3 host's XML envelope. */
+        struct HostEnvelope
+        {
+            std::unique_ptr<juce::XmlElement> xml;   // null when the state wasn't wrapped
+            juce::MemoryBlock component;             // the plugin's own (IComponent) state
+        };
+
+        void unwrapHost (const juce::MemoryBlock& in, HostEnvelope& out)
+        {
+            const auto* bytes = static_cast<const char*> (in.getData());
+            const auto size = in.getSize();
+
+            if (size > 8 && juce::ByteOrder::littleEndianInt (bytes) == kHostXmlMagic)
+            {
+                const auto length = (int) juce::ByteOrder::littleEndianInt (bytes + 4);
+                const auto text = juce::String::fromUTF8 (bytes + 8, juce::jmin ((int) size - 8, length));
+
+                if (auto xml = juce::parseXML (text); xml != nullptr && xml->getChildByName ("IComponent") != nullptr)
+                {
+                    juce::MemoryBlock component;
+                    if (component.fromBase64Encoding (xml->getChildByName ("IComponent")->getAllSubText()))
+                    {
+                        out.xml = std::move (xml);
+                        out.component = std::move (component);
+                        return;
+                    }
+                }
+            }
+
+            out.xml.reset();
+            out.component = in;
+        }
+
+        juce::MemoryBlock rewrapHost (const HostEnvelope& env, const juce::MemoryBlock& component)
+        {
+            if (env.xml == nullptr)
+                return component;
+
+            auto* child = env.xml->getChildByName ("IComponent");
+            child->deleteAllTextElements();
+            child->addTextElement (component.toBase64Encoding());
+
+            // Same layout as juce::AudioProcessor::copyXmlToBinary
+            juce::MemoryBlock out;
+            {
+                juce::MemoryOutputStream stream (out, false);
+                stream.writeInt ((int) kHostXmlMagic);
+                stream.writeInt (0);
+                env.xml->writeTo (stream, juce::XmlElement::TextFormat().singleLine());
+                stream.writeByte (0);
+            }
+            const auto length = juce::ByteOrder::swapIfBigEndian ((juce::uint32) out.getSize() - 9);
+            std::memcpy (static_cast<char*> (out.getData()) + 4, &length, 4);
+            return out;
+        }
+
+        //==============================================================================
+        /** Layer 2: whatever Vital's own wrapper puts around the JSON. We keep the bytes before and after
+            the JSON exactly, only fixing "bytes remaining" size fields in the header. */
+        bool findJson (const char* p, size_t n, size_t& start, size_t& end)
+        {
+            size_t i = 0;
+            while (i < n && p[i] != '{') ++i;
+            if (i == n) return false;
+
+            start = i;
+            int depth = 0;
+            bool inString = false, escaped = false;
+
+            for (; i < n; ++i)
+            {
+                const char c = p[i];
+                if (inString)
+                {
+                    if (escaped)        escaped = false;
+                    else if (c == '\\') escaped = true;
+                    else if (c == '"')  inString = false;
+                    continue;
+                }
+
+                if (c == '"') inString = true;
+                else if (c == '{') ++depth;
+                else if (c == '}' && --depth == 0)
+                {
+                    end = i + 1;
+                    return true;
+                }
+            }
+            return false;
+        }
+
         struct ParsedState
         {
+            HostEnvelope envelope;
+            juce::MemoryBlock prefix, suffix;
             juce::var root;
-            bool trailingNull = false;
         };
 
         juce::Result parseState (const juce::MemoryBlock& state, ParsedState& out)
@@ -15,34 +110,71 @@ namespace wtm::vital
             if (state.getSize() == 0)
                 return juce::Result::fail ("Vital returned an empty patch.");
 
-            const auto* bytes = static_cast<const char*> (state.getData());
-            size_t size = state.getSize();
-            out.trailingNull = bytes[size - 1] == 0;
-            while (size > 0 && bytes[size - 1] == 0)
-                --size;
+            unwrapHost (state, out.envelope);
 
-            const auto text = juce::String::fromUTF8 (bytes, (int) size);
-            const int start = text.indexOfChar ('{');
-            if (start < 0)
+            const auto* bytes = static_cast<const char*> (out.envelope.component.getData());
+            const auto size = out.envelope.component.getSize();
+
+            size_t start = 0, end = 0;
+            if (! findJson (bytes, size, start, end))
                 return juce::Result::fail ("Vital's patch isn't in the expected format (no JSON found).");
 
-            auto r = juce::JSON::parse (text.substring (start), out.root);
+            out.prefix = juce::MemoryBlock (bytes, start);
+            out.suffix = juce::MemoryBlock (bytes + end, size - end);
+
+            auto r = juce::JSON::parse (juce::String::fromUTF8 (bytes + start, (int) (end - start)), out.root);
             if (r.failed() || ! out.root.isObject())
                 return juce::Result::fail ("Couldn't read Vital's patch: " + r.getErrorMessage());
 
             return juce::Result::ok();
         }
 
+        juce::MemoryBlock rebuildState (const ParsedState& parsed, const juce::String& json)
+        {
+            const auto oldJsonSize = (juce::int64) parsed.envelope.component.getSize()
+                                     - (juce::int64) parsed.prefix.getSize() - (juce::int64) parsed.suffix.getSize();
+            const auto newJsonSize = (juce::int64) json.getNumBytesAsUTF8();
+            const auto delta = newJsonSize - oldJsonSize;
+            const auto oldTotal = (juce::int64) parsed.envelope.component.getSize();
+
+            // Header fields like VST2 "CcnK" byteSize / chunkSize hold "bytes remaining after this field".
+            juce::MemoryBlock prefix (parsed.prefix);
+            auto* p = static_cast<unsigned char*> (prefix.getData());
+            for (size_t o = 0; o + 4 <= prefix.getSize(); ++o)
+            {
+                const auto remaining = oldTotal - (juce::int64) (o + 4);
+                const auto be = (juce::int64) juce::ByteOrder::bigEndianInt (p + o);
+                const auto le = (juce::int64) juce::ByteOrder::littleEndianInt (p + o);
+
+                if (be == remaining && remaining > 16)
+                {
+                    const auto v = juce::ByteOrder::swapIfLittleEndian ((juce::uint32) (be + delta));
+                    std::memcpy (p + o, &v, 4);
+                    o += 3;
+                }
+                else if (le == remaining && remaining > 16)
+                {
+                    const auto v = juce::ByteOrder::swapIfBigEndian ((juce::uint32) (le + delta));
+                    std::memcpy (p + o, &v, 4);
+                    o += 3;
+                }
+            }
+
+            juce::MemoryBlock component;
+            component.append (prefix.getData(), prefix.getSize());
+            component.append (json.toRawUTF8(), json.getNumBytesAsUTF8());
+            component.append (parsed.suffix.getData(), parsed.suffix.getSize());
+
+            return rewrapHost (parsed.envelope, component);
+        }
+
+        //==============================================================================
         juce::Array<juce::var>* wavetablesOf (const juce::var& root)
         {
             const auto& settings = root["settings"];
-            if (! settings.isObject())
-                return nullptr;
-            return settings["wavetables"].getArray();
+            return settings.isObject() ? settings["wavetables"].getArray() : nullptr;
         }
 
-        /** Finds a "Wave Source" component with at least one keyframe to use as a template, so every
-            field Vital expects (interpolation settings etc.) is present in what we write. */
         bool findTemplate (const juce::Array<juce::var>& tables, int preferred, juce::var& group, juce::var& component)
         {
             auto search = [&] (const juce::var& table)
@@ -51,8 +183,7 @@ namespace wtm::vital
                     for (auto& g : *groups)
                         if (auto* comps = g["components"].getArray())
                             for (auto& c : *comps)
-                                if (c["type"].toString() == "Wave Source"
-                                    && c["keyframes"].isArray() && c["keyframes"].size() > 0)
+                                if (c["type"].toString() == "Wave Source" && c["keyframes"].isArray() && c["keyframes"].size() > 0)
                                 {
                                     group = g;
                                     component = c;
@@ -71,7 +202,6 @@ namespace wtm::vital
 
         juce::String encodeFrame (const Cycle& c)
         {
-            // Vital stores raw little-endian float32 (Apple Silicon and Intel are both little-endian).
             return juce::Base64::toBase64 (c.data(), c.size() * sizeof (float));
         }
 
@@ -86,14 +216,15 @@ namespace wtm::vital
         }
     }
 
-    juce::Result injectWavetable (const juce::MemoryBlock& vitalState, const std::vector<Cycle>& frames,
+    //==============================================================================
+    juce::Result injectWavetable (const juce::MemoryBlock& state, const std::vector<Cycle>& frames,
                                   int osc, const juce::String& tableName, juce::MemoryBlock& newState)
     {
         if (frames.empty())
             return juce::Result::fail ("There's no wavetable to send yet.");
 
         ParsedState parsed;
-        auto r = parseState (vitalState, parsed);
+        auto r = parseState (state, parsed);
         if (r.failed())
             return r;
 
@@ -108,7 +239,6 @@ namespace wtm::vital
             return juce::Result::fail ("Vital's current patch has no basic wavetable to replace. "
                                        "Load Vital's Init preset (or any patch with a normal wavetable) and try again.");
 
-        // Keyframes: spread our frames over Vital's 0..256 positions.
         const auto keyTemplate = templateComponent["keyframes"][0];
         const int n = (int) frames.size();
         juce::Array<juce::var> keyframes;
@@ -130,39 +260,29 @@ namespace wtm::vital
         group.getDynamicObject()->setProperty ("components", juce::Array<juce::var> { component });
 
         auto table = tables->getReference (osc).clone();
-        if (auto* obj = table.getDynamicObject())
-        {
-            obj->setProperty ("name", tableName.isNotEmpty() ? tableName : juce::String ("Wavetable Morpher"));
-            obj->setProperty ("author", "Wavetable Morpher");
-            obj->setProperty ("full_normalize", false);
-            obj->setProperty ("remove_all_dc", false);
-            obj->setProperty ("groups", juce::Array<juce::var> { group });
-        }
-        else
-        {
+        auto* obj = table.getDynamicObject();
+        if (obj == nullptr)
             return juce::Result::fail ("Vital's oscillator " + juce::String (osc + 1) + " has an unexpected format.");
-        }
 
+        obj->setProperty ("name", tableName.isNotEmpty() ? tableName : juce::String ("Wavetable Morpher"));
+        obj->setProperty ("author", "Wavetable Morpher");
+        obj->setProperty ("full_normalize", false);
+        obj->setProperty ("remove_all_dc", false);
+        obj->setProperty ("groups", juce::Array<juce::var> { group });
         tables->set (osc, table);
 
-        // Make sure the oscillator you're sending to is switched on.
         if (auto* settings = parsed.root["settings"].getDynamicObject())
             settings->setProperty ("osc_" + juce::String (osc + 1) + "_on", 1.0);
 
-        const auto json = juce::JSON::toString (parsed.root, true);
-        newState.reset();
-        newState.append (json.toRawUTF8(), json.getNumBytesAsUTF8());
-        if (parsed.trailingNull)
-            newState.append ("\0", 1);
-
+        newState = rebuildState (parsed, juce::JSON::toString (parsed.root, true));
         return juce::Result::ok();
     }
 
-    juce::Result readWavetable (const juce::MemoryBlock& vitalState, int osc,
+    juce::Result readWavetable (const juce::MemoryBlock& state, int osc,
                                 std::vector<int>& positions, std::vector<Cycle>& frames, juce::String& name)
     {
         ParsedState parsed;
-        auto r = parseState (vitalState, parsed);
+        auto r = parseState (state, parsed);
         if (r.failed())
             return r;
 
@@ -191,5 +311,119 @@ namespace wtm::vital
                             }
 
         return juce::Result::ok();
+    }
+
+    juce::Result renderWavetable (const juce::MemoryBlock& state, int osc,
+                                  std::vector<Cycle>& out, juce::String& name, juce::String& note)
+    {
+        ParsedState parsed;
+        auto r = parseState (state, parsed);
+        if (r.failed())
+            return r;
+
+        auto* tables = wavetablesOf (parsed.root);
+        if (tables == nullptr || ! juce::isPositiveAndBelow (osc, tables->size()))
+            return juce::Result::fail ("Vital's patch has no oscillator " + juce::String (osc + 1) + ".");
+
+        const auto& table = tables->getReference (osc);
+        name = table["name"].toString();
+        note.clear();
+
+        out.assign ((size_t) kVitalFramePositions, Cycle ((size_t) kFrameSize, 0.0f));
+        juce::StringArray skipped;
+        int wavesUsed = 0;
+
+        if (auto* groups = table["groups"].getArray())
+        {
+            for (auto& g : *groups)
+            {
+                auto* comps = g["components"].getArray();
+                if (comps == nullptr)
+                    continue;
+
+                for (auto& c : *comps)
+                {
+                    const auto type = c["type"].toString();
+                    if (type != "Wave Source")
+                    {
+                        skipped.addIfNotAlreadyThere (type);
+                        continue;
+                    }
+
+                    // Keyframes sorted by position, linear blend between them (Vital's default look).
+                    std::vector<std::pair<int, Cycle>> keys;
+                    if (auto* kfs = c["keyframes"].getArray())
+                        for (auto& kf : *kfs)
+                        {
+                            Cycle cyc;
+                            if (decodeFrame (kf["wave_data"].toString(), cyc))
+                                keys.emplace_back (juce::jlimit (0, kVitalFramePositions - 1, (int) kf["position"]), std::move (cyc));
+                        }
+
+                    if (keys.empty())
+                        continue;
+
+                    std::sort (keys.begin(), keys.end(), [] (const auto& a, const auto& b) { return a.first < b.first; });
+                    ++wavesUsed;
+
+                    size_t k = 0;
+                    for (int p = 0; p < kVitalFramePositions; ++p)
+                    {
+                        while (k + 1 < keys.size() && keys[k + 1].first <= p)
+                            ++k;
+
+                        const auto& a = keys[k];
+                        auto& dest = out[(size_t) p];
+
+                        if (p <= a.first || k + 1 >= keys.size())
+                        {
+                            for (size_t i = 0; i < dest.size(); ++i) dest[i] += a.second[i];
+                        }
+                        else
+                        {
+                            const auto& b = keys[k + 1];
+                            const float t = (float) (p - a.first) / (float) std::max (1, b.first - a.first);
+                            for (size_t i = 0; i < dest.size(); ++i)
+                                dest[i] += a.second[i] + t * (b.second[i] - a.second[i]);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (wavesUsed == 0)
+        {
+            out.clear();
+            note = "This Vital wavetable is built from "
+                   + (skipped.isEmpty() ? juce::String ("something this view can't read") : skipped.joinIntoString (" / "))
+                   + ", which can't be shown here.";
+            return juce::Result::ok();
+        }
+
+        // Keep it in -1..1 for display.
+        float peak = 0.0f;
+        for (auto& f : out) peak = std::max (peak, peakOf (f));
+        if (peak > 1.0e-6f)
+            for (auto& f : out) for (auto& v : f) v /= peak;
+
+        if (! skipped.isEmpty())
+            note = "Shown without: " + skipped.joinIntoString (", ") + ".";
+
+        return juce::Result::ok();
+    }
+
+    juce::int64 wavetableFingerprint (const juce::MemoryBlock& state, int osc)
+    {
+        HostEnvelope env;
+        unwrapHost (state, env);
+        const auto* bytes = static_cast<const char*> (env.component.getData());
+        size_t start = 0, end = 0;
+        if (! findJson (bytes, env.component.getSize(), start, end))
+            return 0;
+
+        // Only the wavetables section matters; find it textually to avoid a full parse.
+        const auto text = juce::String::fromUTF8 (bytes + start, (int) (end - start));
+        const int at = text.indexOf ("\"wavetables\"");
+        return (juce::int64) (at >= 0 ? text.substring (at) : text).hashCode64() ^ (juce::int64) osc;
     }
 }

@@ -100,7 +100,7 @@ namespace wtm
         if (frames.empty())
         {
             g.setColour (Colours::dimText);
-            g.drawText ("Building wavetable...", getLocalBounds(), juce::Justification::centred);
+            g.drawFittedText (emptyText, getLocalBounds().reduced (40, 20), juce::Justification::centred, 3);
             return;
         }
 

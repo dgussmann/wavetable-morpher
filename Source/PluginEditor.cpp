@@ -375,6 +375,13 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     // Result + preview -------------------------------------------------------
     tableView.onPositionDragged = [this] (float pos)
     {
+        if (showingSynth)
+        {
+            synthViewPosition = pos;
+            tableView.setPosition (pos);
+            return;
+        }
+
         if (auto* param = proc.apvts.getParameter (ParamIDs::position))
         {
             param->beginChangeGesture();
@@ -383,6 +390,34 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
         }
     };
     addAndMakeVisible (tableView);
+
+    for (auto* b : { &showMorphButton, &showSynthButton })
+    {
+        b->setClickingTogglesState (false);
+        b->setRadioGroupId (4711);
+        addChildComponent (b);
+    }
+    showMorphButton.setToggleState (true, juce::dontSendNotification);
+    showMorphButton.onClick = [this] { setShowingSynth (false); };
+    showSynthButton.onClick = [this] { setShowingSynth (true); };
+    showSynthButton.setTooltip ("Show the wavetable that's in the loaded synth's oscillator 1. Pick a wavetable in Vital and it appears here.");
+
+    useAsAButton.setTooltip ("Use the highlighted frame of the synth's wavetable as Oscillator A");
+    useAsBButton.setTooltip ("Use the highlighted frame of the synth's wavetable as Oscillator B");
+    auto useFrame = [this] (int slot)
+    {
+        const auto& t = proc.getSynthTable();
+        if (t.empty()) return;
+        const int frame = juce::roundToInt (synthViewPosition * (float) ((int) t.size() - 1));
+        proc.useSynthTable (slot, frame);
+        setStatus (juce::String (slot == 0 ? "Oscillator A" : "Oscillator B") + " now uses frame " + juce::String (frame + 1)
+                   + " of Vital's \"" + proc.getSynthTableName() + "\". Use its Frame slider to pick another.");
+        refreshAll();
+    };
+    useAsAButton.onClick = [useFrame] { useFrame (0); };
+    useAsBButton.onClick = [useFrame] { useFrame (1); };
+    addChildComponent (useAsAButton);
+    addChildComponent (useAsBButton);
 
     previewTitle.setText ("Preview", juce::dontSendNotification);
     styleLabel (previewTitle, 15.0f, Colours::accent, true);
@@ -566,6 +601,16 @@ void WavetableMorpherEditor::resized()
 
     r.removeFromBottom (8);
     tableView.setBounds (r);
+
+    // View switch sits over the top-centre of the wavetable view; "use frame" buttons top-right.
+    auto overlay = r.reduced (10, 6).removeFromTop (24);
+    auto centre = overlay.withSizeKeepingCentre (220, 24);
+    showMorphButton.setBounds (centre.removeFromLeft (110));
+    showSynthButton.setBounds (centre);
+    auto bottom = r.reduced (10, 8).removeFromBottom (24);
+    useAsBButton.setBounds (bottom.removeFromRight (80));
+    bottom.removeFromRight (6);
+    useAsAButton.setBounds (bottom.removeFromRight (80));
 }
 
 //==============================================================================
@@ -580,7 +625,7 @@ void WavetableMorpherEditor::refreshAll()
     panelB.refresh();
     panelA.resized();
     panelB.resized();
-    tableView.setFrames (proc.getMorphFrames());
+    updateTableView();
 
     if (! nameEditor.hasKeyboardFocus (true) && nameEditor.getText() != proc.getTableName())
         nameEditor.setText (proc.getTableName(), false);
@@ -732,9 +777,58 @@ void WavetableMorpherEditor::closeSynthWindow()
     synthWindow.reset(); // deletes the synth's editor before the synth itself can go away
 }
 
+void WavetableMorpherEditor::setShowingSynth (bool shouldShow)
+{
+    showingSynth = shouldShow && proc.getHostedSynth() != nullptr;
+    showMorphButton.setToggleState (! showingSynth, juce::dontSendNotification);
+    showSynthButton.setToggleState (showingSynth, juce::dontSendNotification);
+    updateTableView();
+
+    if (showingSynth)
+    {
+        const auto note = proc.getSynthTableNote();
+        if (proc.getSynthTable().empty())
+            setStatus (note.isNotEmpty() ? note : "Reading the synth's oscillator 1...", note.isNotEmpty());
+        else
+            setStatus ("Vital Osc 1: \"" + proc.getSynthTableName() + "\". Click or drag in the view to pick a frame, then Use as A / B."
+                       + (note.isNotEmpty() ? "  (" + note + ")" : juce::String()));
+    }
+}
+
+void WavetableMorpherEditor::updateTableView()
+{
+    const bool hosted = proc.getHostedSynth() != nullptr;
+    if (! hosted && showingSynth)
+        showingSynth = false;
+
+    showMorphButton.setVisible (hosted);
+    showSynthButton.setVisible (hosted);
+    showSynthButton.setButtonText (proc.isHostedVital() ? "Vital Osc 1" : "Synth Osc 1");
+    showMorphButton.setToggleState (! showingSynth, juce::dontSendNotification);
+    showSynthButton.setToggleState (showingSynth, juce::dontSendNotification);
+
+    const bool haveSynthTable = ! proc.getSynthTable().empty();
+    useAsAButton.setVisible (showingSynth && haveSynthTable);
+    useAsBButton.setVisible (showingSynth && haveSynthTable);
+
+    if (showingSynth)
+    {
+        const auto note = proc.getSynthTableNote();
+        tableView.setEmptyText (note.isNotEmpty() ? note : "Reading the synth's oscillator 1...");
+        tableView.setFrames (proc.getSynthTable());
+        tableView.setPosition (synthViewPosition);
+    }
+    else
+    {
+        tableView.setEmptyText ("Building wavetable...");
+        tableView.setFrames (proc.getMorphFrames());
+    }
+}
+
 void WavetableMorpherEditor::timerCallback()
 {
-    tableView.setPosition (proc.getDisplayPosition());
+    if (! showingSynth)
+        tableView.setPosition (proc.getDisplayPosition());
 }
 
 void WavetableMorpherEditor::setStatus (const juce::String& text, bool isError)

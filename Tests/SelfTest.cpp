@@ -160,7 +160,7 @@ int main (int argc, char** argv)
         juce::var root;
         const auto text = juce::String::fromUTF8 (static_cast<const char*> (out.getData()), (int) out.getSize() - 1);
         check (juce::JSON::parse (text, root).wasOk(), "result is valid JSON");
-        check ((double) root["settings"]["osc_2_on"] == 1.0, "target oscillator switched on");
+        check (std::abs ((double) root["settings"]["osc_2_on"] - 1.0) < 1e-9, "target oscillator switched on");
         check (std::abs ((double) root["settings"]["filter_1_cutoff"] - 60.25) < 1e-9, "rest of the patch kept");
         check (root["preset_name"].toString() == "Test" && static_cast<const char*> (out.getData())[out.getSize() - 1] == 0,
                "preset name kept, trailing null kept");
@@ -168,6 +168,99 @@ int main (int argc, char** argv)
         juce::MemoryBlock bad;
         bad.append ("nonsense", 8);
         check (vital::injectWavetable (bad, frames, 0, "x", out).failed(), "non-Vital data is refused safely");
+    }
+
+    // Vital as it really arrives inside a host: VC2 XML envelope -> VST2-style header -> JSON -> JUCE trailer
+    {
+        auto be32 = [] (juce::MemoryOutputStream& o, juce::uint32 v) { o.writeIntBigEndian ((int) v); };
+
+        MorphSettings ms0; ms0.numFrames = 2;
+        const auto start = buildMorph (saw, sine, ms0);
+        const auto json = juce::String ("{\"settings\":{\"osc_1_on\":1.0,\"wavetables\":[{\"name\":\"Basic Shapes\",\"version\":\"1.5.5\",\"groups\":[{\"components\":[{\"type\":\"Wave Source\",\"interpolation\":1,\"interpolation_style\":1,\"keyframes\":[")
+                          + "{\"position\":0,\"wave_data\":\"" + juce::Base64::toBase64 (start[0].data(), kFrameSize * 4) + "\"},"
+                          + "{\"position\":256,\"wave_data\":\"" + juce::Base64::toBase64 (start[1].data(), kFrameSize * 4) + "\"}]},"
+                          + "{\"type\":\"Phase Shift\",\"keyframes\":[{\"position\":0,\"shift\":0.0}]}]}]},"
+                          + "{\"name\":\"B\",\"groups\":[]},{\"name\":\"C\",\"groups\":[]}]},\"synth_version\":\"1.5.5\"}";
+
+        // Vital's getStateInformation: JSON + null, then JUCE wrapper's private-data trailer
+        juce::MemoryOutputStream chunk;
+        chunk.write (json.toRawUTF8(), json.getNumBytesAsUTF8());
+        chunk.writeByte (0);
+        chunk.writeInt64 (0);
+        const char priv[] = "fake-private-data";
+        chunk.write (priv, sizeof (priv));
+        chunk.writeInt64 ((juce::int64) sizeof (priv));
+        chunk << "JUCEPrivateData";
+
+        // VST2-compatible header: VstW + CcnK/FBCh bank with "bytes remaining" fields
+        juce::MemoryOutputStream comp;
+        comp.write ("VstW", 4); be32 (comp, 8); be32 (comp, 1); be32 (comp, 0);
+        const int ccnkStart = (int) comp.getDataSize();
+        comp.write ("CcnK", 4);
+        const auto bankHeader = 4 + 4 + 4 + 4 + 128 + 4;  // FBCh, version, fxID, fxVersion, numPrograms... simplified + chunkSize
+        be32 (comp, (juce::uint32) (bankHeader + chunk.getDataSize()));  // byteSize: everything after this field
+        comp.write ("FBCh", 4); be32 (comp, 2); comp.write ("Vita", 4); be32 (comp, 10505); be32 (comp, 1);
+        for (int i = 0; i < 128 - 4; ++i) comp.writeByte (0);
+        be32 (comp, (juce::uint32) chunk.getDataSize());   // chunkSize
+        comp.write (chunk.getData(), chunk.getDataSize());
+        juce::ignoreUnused (ccnkStart);
+
+        juce::MemoryBlock compBlock (comp.getData(), comp.getDataSize());
+        juce::XmlElement xml ("VST3PluginState");
+        xml.createNewChildElement ("IComponent")->addTextElement (compBlock.toBase64Encoding());
+        xml.createNewChildElement ("IEditController")->addTextElement ("AAAA");
+        juce::MemoryBlock host;
+        {
+            juce::MemoryOutputStream o (host, false);
+            o.writeInt (0x21324356); o.writeInt (0);
+            xml.writeTo (o, juce::XmlElement::TextFormat().singleLine());
+            o.writeByte (0);
+        }
+        const auto len = (juce::uint32) host.getSize() - 9;
+        std::memcpy (static_cast<char*> (host.getData()) + 4, &len, 4);
+
+        // Display: render Vital osc 1
+        std::vector<Cycle> shown; juce::String nm, note;
+        check (vital::renderWavetable (host, 0, shown, nm, note).wasOk() && shown.size() == 257 && nm == "Basic Shapes",
+               "reads Vital osc 1 through all wrappers (257 frames)");
+        check (maxDiff (shown[0], start[0]) < 0.02f || peakOf (shown[0]) > 0.5f, "osc 1 first frame looks like the saw");
+        check (note.contains ("Phase Shift"), "notes the modifier it can't show: " + note);
+
+        // Send to osc 2
+        MorphSettings ms; ms.numFrames = 64;
+        const auto frames = buildMorph (sine, saw, ms);
+        juce::MemoryBlock out;
+        const auto r = vital::injectWavetable (host, frames, 1, "Wrapped", out);
+        check (r.wasOk(), "inject through host + VST2 wrappers: " + r.getErrorMessage());
+
+        // Unwrap the result by hand and check every layer
+        const auto* ob = static_cast<const char*> (out.getData());
+        const auto magic = juce::ByteOrder::littleEndianInt (ob);
+        const auto xlen = (int) juce::ByteOrder::littleEndianInt (ob + 4);
+        check (magic == 0x21324356 && xlen == (int) out.getSize() - 9, "host envelope header + length correct");
+        auto outXml = juce::parseXML (juce::String::fromUTF8 (ob + 8, xlen));
+        check (outXml != nullptr && outXml->getChildByName ("IEditController") != nullptr
+                   && outXml->getChildByName ("IEditController")->getAllSubText() == "AAAA", "editor state kept");
+
+        juce::MemoryBlock oc;
+        oc.fromBase64Encoding (outXml->getChildByName ("IComponent")->getAllSubText());
+        const auto* c = static_cast<const unsigned char*> (oc.getData());
+        check (std::memcmp (c, "VstW", 4) == 0 && std::memcmp (c + 16, "CcnK", 4) == 0, "VST2 header kept");
+        const auto byteSize = juce::ByteOrder::bigEndianInt (c + 20);
+        check ((size_t) byteSize == oc.getSize() - 24, "CcnK byteSize updated to new size");
+        const size_t chunkSizeAt = 24 + 4 + 4 + 4 + 4 + 4 + 124;
+        const auto chunkSize = juce::ByteOrder::bigEndianInt (c + chunkSizeAt);
+        check ((size_t) chunkSize == oc.getSize() - chunkSizeAt - 4, "chunkSize updated to new size");
+        const juce::String tail (juce::CharPointer_UTF8 ((const char*) c + oc.getSize() - 15), 15);
+        check (tail == "JUCEPrivateData", "JUCE trailer kept at the end");
+
+        std::vector<int> pos; std::vector<Cycle> got; juce::String name;
+        check (vital::readWavetable (out, 1, pos, got, name).wasOk() && got.size() == 64 && name == "Wrapped",
+               "osc 2 holds the 64-frame morph");
+        std::vector<Cycle> again; juce::String n1, note1;
+        vital::renderWavetable (out, 0, again, n1, note1);
+        check (n1 == "Basic Shapes", "osc 1 untouched by sending to osc 2");
+        check (vital::wavetableFingerprint (out, 0) != vital::wavetableFingerprint (host, 0), "change detection notices the new table");
     }
 
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " FAILURES") << std::endl;

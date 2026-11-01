@@ -49,6 +49,7 @@ namespace wtm
     {
     public:
         void setFrames (std::vector<Cycle> f) { frames = std::move (f); repaint(); }
+        void setEmptyText (const juce::String& t) { if (t != emptyText) { emptyText = t; repaint(); } }
         void setPosition (float p)
         {
             if (std::abs (p - position) > 0.0005f) { position = p; repaint(); }
@@ -64,6 +65,7 @@ namespace wtm
     private:
         std::vector<Cycle> frames;
         float position = 0.0f;
+        juce::String emptyText { "Building wavetable..." };
     };
 
     class MorphLookAndFeel : public juce::LookAndFeel_V4

@@ -124,6 +124,15 @@ public:
     void setAutoSend (bool b) { autoSend = b; }
     bool isVitalUpToDate() const noexcept { return lastSentVersion == tableVersion.load(); }
 
+    /** The wavetable currently in the loaded synth's oscillator 1 (Vital only - Serum 2's patches can't be read). */
+    const std::vector<wtm::Cycle>& getSynthTable() const noexcept { return synthTable; }
+    juce::String getSynthTableName() const { return synthTableName; }
+    juce::String getSynthTableNote() const { return synthTableNote; }
+    void pollSynthTable (bool force = false);
+
+    /** Uses the loaded synth's oscillator-1 wavetable as a source for oscillator A or B. */
+    void useSynthTable (int slot, int frameIndex);
+
     /** Writes the current morph to a WAV for dragging onto a synth. */
     juce::Result writeDragFile (juce::File& result);
 
@@ -176,6 +185,7 @@ private:
 
     // Hosted synth
     void prepareHosted();
+    void saveDiagnostic (const juce::MemoryBlock& data, const juce::String& name);
     juce::AudioPluginFormatManager formatManager;
     std::unique_ptr<juce::AudioPluginInstance> hosted;
     juce::File hostedFile;
@@ -189,12 +199,18 @@ private:
     int loadGeneration = 0;
 
     // Vital auto-send
-    int vitalOsc = 0;
+    int vitalOsc = 1; // send to Vital's osc 2 by default, so osc 1 stays free for browsing Vital's own tables
     bool autoSend = true;
     std::atomic<int> tableVersion { 0 };
     int lastSentVersion = -1;
     std::atomic<double> lastTableChangeMs { 0.0 };
     std::atomic<int> heldNotes { 0 };
+
+    // Synth's oscillator 1, for display
+    std::vector<wtm::Cycle> synthTable;
+    juce::String synthTableName, synthTableNote;
+    juce::int64 synthFingerprint = 0;
+    int pollCounter = 0;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (WavetableMorpherProcessor)
 

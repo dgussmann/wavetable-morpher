@@ -135,6 +135,14 @@ private:
     std::unique_ptr<HostedSynthWindow> synthWindow;
     bool loadingSynth = false;
 
+    // What the big view shows: your morph, or the synth's oscillator 1
+    juce::TextButton showMorphButton { "Your morph" }, showSynthButton { "Synth Osc 1" };
+    juce::TextButton useAsAButton { "Use as A" }, useAsBButton { "Use as B" };
+    bool showingSynth = false;
+    float synthViewPosition = 0.0f;
+    void setShowingSynth (bool);
+    void updateTableView();
+
     // Result + preview
     wtm::WavetableView tableView;
     juce::Label previewTitle;
