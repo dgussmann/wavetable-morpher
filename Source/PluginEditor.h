@@ -17,6 +17,8 @@ public:
 
 private:
     void importClicked();
+    void browseFrom (const juce::File& folder);
+    void step (int direction);
 
     WavetableMorpherProcessor& proc;
     const int slot;
@@ -24,7 +26,8 @@ private:
 
     juce::Label titleLabel, frameLabel;
     juce::ComboBox shapeBox;
-    juce::TextButton importButton { "Import..." }, drawButton { "Draw" };
+    juce::TextButton importButton { "Import" }, drawButton { "Draw" };
+    juce::TextButton prevButton, nextButton;
     juce::Slider frameSlider;
     wtm::WaveformView waveform;
     std::unique_ptr<juce::FileChooser> chooser;
@@ -72,6 +75,7 @@ private:
 
     WavetableMorpherProcessor& proc;
     wtm::MorphLookAndFeel lookAndFeel;
+    juce::TooltipWindow tooltips { this, 600 };
 
     // Header
     juce::Label titleLabel, nameLabel, sendLabel;

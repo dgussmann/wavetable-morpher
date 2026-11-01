@@ -38,6 +38,7 @@ public:
         Kind kind = Kind::Shape;
         int shapeIndex = 0;
         juce::String importedName;
+        juce::File importedFile;                // so the arrows can step to the next file in its folder
         std::vector<wtm::Cycle> importedFrames; // whole imported file (not saved with the session)
         int importedFrame = 0;
         wtm::Cycle cycle;                       // the waveform actually used
@@ -77,6 +78,13 @@ public:
     void setShape (int slot, int shapeIndex);
     juce::Result importFile (int slot, const juce::File& file);
     void setImportedFrame (int slot, int frame);
+
+    /** Steps to the previous/next wavetable file in the same folder (or the previous/next built-in shape).
+        Returns a short description for the status line. */
+    juce::Result stepSource (int slot, int direction, juce::String& description);
+
+    juce::File getLastImportFolder();
+    void setLastImportFolder (const juce::File& folder);
     void setDrawnCycle (int slot, const wtm::Cycle& cycle);
     void swapSlots();
 

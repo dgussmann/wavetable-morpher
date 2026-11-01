@@ -187,6 +187,47 @@ namespace wtm
         return {};
     }
 
+    juce::File detectBrowseFolder (Destination d)
+    {
+        switch (d)
+        {
+            case Destination::Serum2:
+            {
+                const auto ours = detectDefaultFolder (Destination::Serum2); // .../Tables/Wavetable Morpher
+                return ours == juce::File() ? juce::File() : ours.getParentDirectory();
+            }
+            case Destination::Vital:
+            {
+                const auto data = findVitalDataDirectory();
+                if (data == juce::File())
+                    return {};
+                const auto user = data.getChildFile ("User").getChildFile ("Wavetables");
+                return user.isDirectory() ? user : data;
+            }
+            case Destination::Library:
+            case Destination::MassiveXL:
+                return detectDefaultFolder (d);
+            case Destination::NumDestinations:
+                break;
+        }
+        return {};
+    }
+
+    juce::Array<juce::File> audioFilesIn (const juce::File& folder)
+    {
+        auto files = folder.findChildFiles (juce::File::findFiles, false, audioWildcard());
+
+        struct NaturalOrder
+        {
+            static int compareElements (const juce::File& a, const juce::File& b)
+            {
+                return a.getFileName().compareNatural (b.getFileName());
+            }
+        } order;
+        files.sort (order);
+        return files;
+    }
+
     juce::String destinationHelp (Destination d)
     {
         switch (d)

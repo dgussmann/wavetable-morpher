@@ -100,7 +100,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout WavetableMorpherProcessor::c
                                                        NormalisableRange<float> (-48.0f, 6.0f), -12.0f,
                                                        fmt ([] (float v) { return String (v, 1) + " dB"; })));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::frames, 1 }, "Frames",
-                                                        wtm::frameCountNames(), 3));
+                                                        wtm::frameCountNames(), 5)); // 256, like Serum
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::morphMode, 1 }, "Morph Mode",
                                                         wtm::morphModeNames(), 1));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::curve, 1 }, "Morph Curve",
@@ -261,11 +261,69 @@ juce::Result WavetableMorpherProcessor::importFile (int slot, const juce::File& 
     auto& s = slots[(size_t) slot];
     s.kind = SourceSlot::Kind::Imported;
     s.importedName = imported.fileName;
+    s.importedFile = file;
     s.importedFrames = std::move (imported.frames);
     s.importedFrame = 0;
     s.cycle = s.importedFrames.front();
+    setLastImportFolder (file.getParentDirectory());
     requestRebuild();
     return r;
+}
+
+juce::Result WavetableMorpherProcessor::stepSource (int slot, int direction, juce::String& description)
+{
+    auto& s = slots[(size_t) slot];
+    direction = direction < 0 ? -1 : 1;
+
+    if (s.kind == SourceSlot::Kind::Imported && s.importedFile.getParentDirectory().isDirectory())
+    {
+        const auto files = wtm::audioFilesIn (s.importedFile.getParentDirectory());
+        if (files.isEmpty())
+            return juce::Result::fail ("No wavetables left in " + s.importedFile.getParentDirectory().getFileName() + ".");
+
+        int index = files.indexOf (s.importedFile);
+        const int count = files.size();
+        juce::String lastError;
+
+        // Skip over any files that won't load (wrong format, too short...), but never loop forever.
+        for (int tries = 0; tries < count; ++tries)
+        {
+            index = index < 0 ? (direction > 0 ? 0 : count - 1) : (index + direction + count) % count;
+            const auto r = importFile (slot, files.getReference (index));
+            if (r.wasOk())
+            {
+                description = juce::String (index + 1) + " / " + juce::String (count) + " in "
+                              + files.getReference (index).getParentDirectory().getFileName() + ":  "
+                              + files.getReference (index).getFileNameWithoutExtension();
+                return r;
+            }
+            lastError = r.getErrorMessage();
+        }
+
+        return juce::Result::fail (lastError);
+    }
+
+    // Built-in shapes (or a drawn wave): step through the shape list.
+    const int numShapes = (int) wtm::Shape::NumShapes;
+    const int next = s.kind == SourceSlot::Kind::Shape ? (s.shapeIndex + direction + numShapes) % numShapes
+                                                       : (direction > 0 ? 0 : numShapes - 1);
+    setShape (slot, next);
+    description = wtm::shapeNames()[next];
+    return juce::Result::ok();
+}
+
+juce::File WavetableMorpherProcessor::getLastImportFolder()
+{
+    const auto path = settings().getValue ("lastImportFolder");
+    const juce::File f = juce::File::isAbsolutePath (path) ? juce::File (path) : juce::File();
+    return f.isDirectory() ? f : juce::File();
+}
+
+void WavetableMorpherProcessor::setLastImportFolder (const juce::File& folder)
+{
+    auto& st = settings();
+    st.setValue ("lastImportFolder", folder.getFullPathName());
+    st.saveIfNeeded();
 }
 
 void WavetableMorpherProcessor::setImportedFrame (int slot, int frame)
@@ -354,6 +412,7 @@ void WavetableMorpherProcessor::getStateInformation (juce::MemoryBlock& destData
         slot.setProperty ("kind", (int) s.kind, nullptr);
         slot.setProperty ("shape", s.shapeIndex, nullptr);
         slot.setProperty ("importedName", s.importedName, nullptr);
+        slot.setProperty ("importedFile", s.importedFile.getFullPathName(), nullptr);
         slot.setProperty ("cycle", wtm::cycleToBase64 (s.cycle), nullptr);
         sources.appendChild (slot, nullptr);
     }
@@ -389,6 +448,8 @@ void WavetableMorpherProcessor::setStateInformation (const void* data, int sizeI
             s.kind = (SourceSlot::Kind) juce::jlimit (0, 2, (int) slot.getProperty ("kind", 0));
             s.shapeIndex = (int) slot.getProperty ("shape", 0);
             s.importedName = slot.getProperty ("importedName", "").toString();
+            const auto path = slot.getProperty ("importedFile", "").toString();
+            s.importedFile = juce::File::isAbsolutePath (path) ? juce::File (path) : juce::File();
             s.importedFrames.clear();
             s.importedFrame = 0;
 

@@ -26,6 +26,13 @@ namespace wtm
         Returns an empty File when the synth's folder couldn't be found on this Mac. */
     juce::File detectDefaultFolder (Destination d);
 
+    /** Top folder of a synth's wavetables, for browsing when importing (empty if not found). */
+    juce::File detectBrowseFolder (Destination d);
+
+    /** WAV/AIFF/FLAC files directly inside a folder, sorted the way Finder sorts them. */
+    juce::Array<juce::File> audioFilesIn (const juce::File& folder);
+    inline const char* audioWildcard() { return "*.wav;*.aif;*.aiff;*.flac"; }
+
     /** Extra advice shown if a write fails or no folder is found. */
     juce::String destinationHelp (Destination d);
 }

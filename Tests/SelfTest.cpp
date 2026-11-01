@@ -95,6 +95,32 @@ int main (int argc, char** argv)
         check (importAudioFile (file, back).wasOk() && (int) back.frames.size() == n, "re-imports as " + juce::String (n) + " frames");
     }
 
+    // Folder stepping order: natural sort, audio files only
+    {
+        auto dir = outDir.getChildFile ("step_test");
+        dir.deleteRecursively();
+        dir.createDirectory();
+        MorphSettings s; s.numFrames = 4;
+        const auto fr = buildMorph (sine, saw, s);
+        for (auto n : { "Table 10", "Table 2", "Table 1" })
+            writeWavetableWav (dir.getChildFile (juce::String (n) + ".wav"), fr);
+        dir.getChildFile ("notes.txt").replaceWithText ("x");
+        const auto files = audioFilesIn (dir);
+        check (files.size() == 3 && files[0].getFileName() == "Table 1.wav" && files[1].getFileName() == "Table 2.wav"
+                   && files[2].getFileName() == "Table 10.wav",
+               "arrow order: Table 1, Table 2, Table 10 (non-audio skipped)");
+    }
+
+    // 256-frame spectral build stays fast enough to feel instant
+    {
+        MorphSettings s; s.numFrames = 256; s.mode = MorphMode::Spectral;
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        PlaybackTable t (buildMorph (sine, saw, s));
+        const auto ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        std::cout << "  (256-frame spectral build + playback tables: " << (int) ms << " ms)" << std::endl;
+        check (t.getNumFrames() == 256, "256-frame table builds");
+    }
+
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " FAILURES") << std::endl;
     return failures == 0 ? 0 : 1;
 }

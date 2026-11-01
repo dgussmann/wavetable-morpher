@@ -35,9 +35,18 @@ SourcePanel::SourcePanel (WavetableMorpherProcessor& p, int slotIndex, juce::Col
     };
     addAndMakeVisible (shapeBox);
 
-    importButton.setTooltip ("Load a single-cycle wave or any wavetable (WAV, AIFF, FLAC)");
+    importButton.setTooltip ("Load a wave or wavetable (WAV, AIFF, FLAC) - jump straight to your Serum 2 or Vital tables");
     importButton.onClick = [this] { importClicked(); };
     addAndMakeVisible (importButton);
+
+    prevButton.setButtonText (juce::String::fromUTF8 ("\xe2\x97\x80"));   // ◀
+    nextButton.setButtonText (juce::String::fromUTF8 ("\xe2\x96\xb6"));   // ▶
+    prevButton.setTooltip ("Previous wavetable in this folder (or previous shape)");
+    nextButton.setTooltip ("Next wavetable in this folder (or next shape)");
+    prevButton.onClick = [this] { step (-1); };
+    nextButton.onClick = [this] { step (+1); };
+    addAndMakeVisible (prevButton);
+    addAndMakeVisible (nextButton);
 
     drawButton.setClickingTogglesState (true);
     drawButton.setTooltip ("Draw your own waveform with the mouse");
@@ -91,11 +100,43 @@ void SourcePanel::refresh()
 
 void SourcePanel::importClicked()
 {
-    auto startDir = proc.getDestinationFolder (Destination::Library);
-    if (! startDir.isDirectory())
-        startDir = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    juce::PopupMenu menu;
+    const auto serum   = detectBrowseFolder (Destination::Serum2);
+    const auto vital   = detectBrowseFolder (Destination::Vital);
+    const auto massive = detectBrowseFolder (Destination::MassiveXL);
+    const auto library = proc.getDestinationFolder (Destination::Library);
+    const auto last    = proc.getLastImportFolder();
 
-    chooser = std::make_unique<juce::FileChooser> ("Import a waveform or wavetable", startDir, "*.wav;*.aif;*.aiff;*.flac");
+    menu.addSectionHeader ("Import a wave or wavetable from...");
+    menu.addItem (1, "Serum 2 Tables" + juce::String (serum.isDirectory() ? "" : "  (not found)"), serum.isDirectory());
+    menu.addItem (2, "Vital Wavetables" + juce::String (vital.isDirectory() ? "" : "  (not found)"), vital.isDirectory());
+    if (massive.isDirectory())
+        menu.addItem (3, "Massive XL Wavetables");
+    menu.addItem (4, "My saved morphs", library.isDirectory());
+    if (last.isDirectory())
+        menu.addItem (5, "Last folder: " + last.getFileName());
+    menu.addSeparator();
+    menu.addItem (6, "Browse...");
+
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&importButton),
+                        [this, serum, vital, massive, library, last] (int result)
+                        {
+                            switch (result)
+                            {
+                                case 1: browseFrom (serum); break;
+                                case 2: browseFrom (vital); break;
+                                case 3: browseFrom (massive); break;
+                                case 4: browseFrom (library); break;
+                                case 5: browseFrom (last); break;
+                                case 6: browseFrom (last.isDirectory() ? last : juce::File::getSpecialLocation (juce::File::userMusicDirectory)); break;
+                                default: break;
+                            }
+                        });
+}
+
+void SourcePanel::browseFrom (const juce::File& folder)
+{
+    chooser = std::make_unique<juce::FileChooser> ("Import a waveform or wavetable", folder, audioWildcard());
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                           [this] (const juce::FileChooser& fc)
                           {
@@ -113,12 +154,28 @@ void SourcePanel::importClicked()
                               drawButton.setToggleState (false, juce::dontSendNotification);
                               waveform.setDrawMode (false);
                               refresh();
+                              resized();
 
                               const auto n = proc.getSlot (slot).importedFrames.size();
                               if (onStatus)
                                   onStatus ("Imported \"" + file.getFileName() + "\""
-                                            + (n > 1 ? " - " + juce::String ((int) n) + " frames, pick one with the Frame slider." : juce::String (".")));
+                                            + (n > 1 ? " - " + juce::String ((int) n) + " frames, pick one with the Frame slider. Use the arrows to try the next table in this folder."
+                                                     : juce::String (". Use the arrows to try the next file in this folder.")));
                           });
+}
+
+void SourcePanel::step (int direction)
+{
+    juce::String description;
+    const auto r = proc.stepSource (slot, direction, description);
+
+    drawButton.setToggleState (false, juce::dontSendNotification);
+    waveform.setDrawMode (false);
+    refresh();
+    resized();
+
+    if (onStatus)
+        onStatus (r.wasOk() ? (slot == 0 ? "Oscillator A: " : "Oscillator B: ") + description : r.getErrorMessage());
 }
 
 void SourcePanel::paint (juce::Graphics& g)
@@ -134,12 +191,16 @@ void SourcePanel::resized()
 {
     auto r = getLocalBounds().reduced (12, 10);
     auto top = r.removeFromTop (26);
-    titleLabel.setBounds (top.removeFromLeft (110));
-    drawButton.setBounds (top.removeFromRight (64));
+    titleLabel.setBounds (top.removeFromLeft (120));
+    drawButton.setBounds (top.removeFromRight (60));
     top.removeFromRight (6);
-    importButton.setBounds (top.removeFromRight (82));
-    top.removeFromRight (6);
-    shapeBox.setBounds (top);
+    importButton.setBounds (top.removeFromRight (76));
+
+    r.removeFromTop (6);
+    auto selector = r.removeFromTop (26);
+    prevButton.setBounds (selector.removeFromLeft (30));
+    nextButton.setBounds (selector.removeFromRight (30));
+    shapeBox.setBounds (selector.reduced (6, 0));
 
     r.removeFromTop (8);
     if (frameSlider.isVisible())
