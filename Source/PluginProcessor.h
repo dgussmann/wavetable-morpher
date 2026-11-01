@@ -42,9 +42,18 @@ public:
         juce::File importedFile;                // so the arrows can step to the next file in its folder
         std::vector<wtm::Cycle> importedFrames; // whole imported file (not saved with the session)
         int importedFrame = 0;
-        wtm::Cycle cycle;                       // the waveform actually used
+        wtm::Cycle cycle;                       // the frame used for the morph
 
         juce::String describe() const;
+
+        /** The whole wavetable this oscillator holds: every frame of an imported table, else one wave. */
+        std::vector<wtm::Cycle> table() const
+        {
+            if (kind == Kind::Imported && ! importedFrames.empty())
+                return importedFrames;
+            return { cycle };
+        }
+        juce::String tableName() const;
     };
 
     WavetableMorpherProcessor();
@@ -90,6 +99,17 @@ public:
     void swapSlots();
 
     std::vector<wtm::Cycle> getMorphFrames() const;
+
+    /** What the synth (built-in or loaded) plays: Oscillator A's table, the morph, or Oscillator B's table. */
+    enum class PlaySource { OscA = 0, Morph = 1, OscB = 2 };
+    PlaySource getPlaySource() const noexcept { return playSource; }
+    void setPlaySource (PlaySource p);
+    std::vector<wtm::Cycle> getPlayFrames() const;
+    juce::String getPlayName() const;
+
+    /** Position (0..1) in the playing table. Follows the loaded synth's own wavetable-position knob when it has one. */
+    float getPlayPosition() const;
+    void setPlayPosition (float position);
     wtm::MorphSettings getMorphSettings() const;
     float getDisplayPosition() const noexcept { return displayPosition.load(); }
 
@@ -119,7 +139,7 @@ public:
     /** Puts the current morph into the chosen oscillator of the loaded Vital. */
     juce::Result sendToVital();
     int getVitalOscillator() const noexcept { return vitalOsc; }
-    void setVitalOscillator (int i) { vitalOsc = juce::jlimit (0, 2, i); lastSentVersion = -1; }
+    void setVitalOscillator (int i) { vitalOsc = juce::jlimit (0, 2, i); lastSentVersion = -1; findHostedFrameParam(); }
     bool getAutoSend() const noexcept { return autoSend; }
     void setAutoSend (bool b) { autoSend = b; }
     bool isVitalUpToDate() const noexcept { return lastSentVersion == tableVersion.load(); }
@@ -160,6 +180,7 @@ private:
     // Rebuild job hand-off (message thread -> worker)
     juce::CriticalSection jobLock;
     wtm::Cycle jobA, jobB;
+    std::vector<wtm::Cycle> jobPlayTable; // empty = play the morph
     wtm::MorphSettings jobSettings;
     bool jobPending = false;
     wtm::MorphSettings lastRequestedSettings;
@@ -171,7 +192,12 @@ private:
     std::vector<std::shared_ptr<const wtm::PlaybackTable>> keepAlive; // worker only: stops the audio thread freeing memory
 
     mutable juce::CriticalSection displayLock;
-    std::vector<wtm::Cycle> displayFrames;
+    std::vector<wtm::Cycle> displayFrames, playFrames;
+    PlaySource playSource = PlaySource::Morph;
+
+    // The loaded synth's wavetable-position parameter for the oscillator we send to (-1 = none found)
+    int hostedFrameParam = -1;
+    void findHostedFrameParam();
 
     // Preview synth
     juce::Synthesiser synth;

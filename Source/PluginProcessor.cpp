@@ -21,6 +21,17 @@ private:
 };
 
 //==============================================================================
+juce::String WavetableMorpherProcessor::SourceSlot::tableName() const
+{
+    switch (kind)
+    {
+        case Kind::Shape:    return wtm::shapeNames()[shapeIndex];
+        case Kind::Imported: return importedName;
+        case Kind::Drawn:    return "Drawn wave";
+    }
+    return {};
+}
+
 juce::String WavetableMorpherProcessor::SourceSlot::describe() const
 {
     switch (kind)
@@ -272,6 +283,9 @@ void WavetableMorpherProcessor::requestRebuild()
         const juce::ScopedLock sl (jobLock);
         jobA = slots[0].cycle;
         jobB = slots[1].cycle;
+        jobPlayTable = playSource == PlaySource::OscA ? slots[0].table()
+                     : playSource == PlaySource::OscB ? slots[1].table()
+                                                      : std::vector<wtm::Cycle>();
         jobSettings = lastRequestedSettings;
         jobPending = true;
     }
@@ -285,16 +299,19 @@ void WavetableMorpherProcessor::rebuildWorker()
     {
         wtm::Cycle a, b;
         wtm::MorphSettings s;
+        std::vector<wtm::Cycle> play;
         {
             const juce::ScopedLock sl (jobLock);
             if (! jobPending)
                 return;
-            a = jobA; b = jobB; s = jobSettings;
+            a = jobA; b = jobB; s = jobSettings; play = jobPlayTable;
             jobPending = false;
         }
 
         auto frames = wtm::buildMorph (a, b, s);
-        auto table = std::make_shared<const wtm::PlaybackTable> (frames);
+        if (play.empty())
+            play = frames;
+        auto table = std::make_shared<const wtm::PlaybackTable> (play);
 
         // Drop tables nobody uses any more (never the one we're about to publish).
         keepAlive.erase (std::remove_if (keepAlive.begin(), keepAlive.end(),
@@ -309,6 +326,7 @@ void WavetableMorpherProcessor::rebuildWorker()
         {
             const juce::ScopedLock sl (displayLock);
             displayFrames = std::move (frames);
+            playFrames = std::move (play);
         }
 
         lastTableChangeMs = juce::Time::getMillisecondCounterHiRes();
@@ -321,6 +339,86 @@ std::vector<wtm::Cycle> WavetableMorpherProcessor::getMorphFrames() const
 {
     const juce::ScopedLock sl (displayLock);
     return displayFrames;
+}
+
+std::vector<wtm::Cycle> WavetableMorpherProcessor::getPlayFrames() const
+{
+    const juce::ScopedLock sl (displayLock);
+    return playFrames;
+}
+
+void WavetableMorpherProcessor::setPlaySource (PlaySource p)
+{
+    if (p == playSource)
+        return;
+    playSource = p;
+    requestRebuild(); // rebuilds the playing table; Vital gets it via auto-send
+}
+
+juce::String WavetableMorpherProcessor::getPlayName() const
+{
+    switch (playSource)
+    {
+        case PlaySource::OscA: return slots[0].tableName();
+        case PlaySource::OscB: return slots[1].tableName();
+        case PlaySource::Morph: break;
+    }
+    return tableName;
+}
+
+void WavetableMorpherProcessor::findHostedFrameParam()
+{
+    hostedFrameParam = -1;
+    if (hosted == nullptr)
+        return;
+
+    {
+        // Record the synth's parameter names once, so the matching below can be checked/fixed.
+        juce::String names;
+        for (auto* p : hosted->getParameters())
+            names << p->getName (64) << "\n";
+        const auto dir = getDestinationFolder (wtm::Destination::Library).getChildFile ("Diagnostics");
+        dir.createDirectory();
+        dir.getChildFile (juce::File::createLegalFileName (hosted->getName()) + "-parameters.txt").replaceWithText (names);
+    }
+
+    const auto osc = juce::String (vitalOsc + 1);
+    const auto& params = hosted->getParameters();
+    for (int i = 0; i < params.size(); ++i)
+    {
+        const auto n = params[i]->getName (64).toLowerCase();
+        // Vital: "Oscillator 2 Frame" / "Osc 2 Wave Frame"...
+        if (hostedIsVital && n.contains ("osc") && n.contains (osc) && n.contains ("frame"))
+        {
+            hostedFrameParam = i;
+            return;
+        }
+    }
+}
+
+float WavetableMorpherProcessor::getPlayPosition() const
+{
+    if (hosted != nullptr && hostedFrameParam >= 0)
+        if (auto* p = hosted->getParameters()[hostedFrameParam])
+            return p->getValue();
+
+    return apvts.getRawParameterValue (ParamIDs::position)->load();
+}
+
+void WavetableMorpherProcessor::setPlayPosition (float position)
+{
+    position = juce::jlimit (0.0f, 1.0f, position);
+
+    if (auto* param = apvts.getParameter (ParamIDs::position))
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost (param->convertTo0to1 (position));
+        param->endChangeGesture();
+    }
+
+    if (hosted != nullptr && hostedFrameParam >= 0)
+        if (auto* p = hosted->getParameters()[hostedFrameParam])
+            p->setValueNotifyingHost (position);
 }
 
 //==============================================================================
@@ -505,6 +603,7 @@ void WavetableMorpherProcessor::getStateInformation (juce::MemoryBlock& destData
         juce::ValueTree host ("HOST");
         host.setProperty ("vitalOsc", vitalOsc, nullptr);
         host.setProperty ("autoSend", autoSend, nullptr);
+        host.setProperty ("playSource", (int) playSource, nullptr);
 
         const juce::ScopedLock sl (lifetimeLock);
         if (hosted != nullptr)
@@ -541,6 +640,7 @@ void WavetableMorpherProcessor::setStateInformation (const void* data, int sizeI
     {
         vitalOsc = juce::jlimit (0, 2, (int) host.getProperty ("vitalOsc", 1));
         autoSend = (bool) host.getProperty ("autoSend", true);
+        playSource = (PlaySource) juce::jlimit (0, 2, (int) host.getProperty ("playSource", 1));
 
         const auto path = host.getProperty ("file", "").toString();
         juce::MemoryBlock hostedState;
@@ -703,6 +803,7 @@ void WavetableMorpherProcessor::loadHostedSynth (const juce::File& bundle, std::
             self->synthTableName.clear();
             self->synthTableNote.clear();
             self->synthFingerprint = 0;
+            self->findHostedFrameParam();
             self->pollSynthTable (true);
             if (done) done (juce::Result::ok());
             self->sendChangeMessage();
@@ -725,6 +826,7 @@ void WavetableMorpherProcessor::unloadHostedSynth()
         old = std::move (hosted);
         hostedFile = juce::File();
         hostedIsVital = false;
+        hostedFrameParam = -1;
         setLatencySamples (0);
     }
 
@@ -744,12 +846,12 @@ juce::Result WavetableMorpherProcessor::sendToVital()
         return juce::Result::fail ("Load Vital first.");
 
     const int version = tableVersion.load();
-    const auto frames = getMorphFrames();
+    const auto frames = getPlayFrames();
 
     juce::MemoryBlock current, updated;
     hosted->getStateInformation (current);
 
-    auto r = wtm::vital::injectWavetable (current, frames, vitalOsc, tableName, updated);
+    auto r = wtm::vital::injectWavetable (current, frames, vitalOsc, getPlayName(), updated);
     if (r.failed())
     {
         saveDiagnostic (current, "vital-send-error");
@@ -831,7 +933,7 @@ juce::Result WavetableMorpherProcessor::writeDragFile (juce::File& result)
 {
     const auto name = juce::File::createLegalFileName (tableName.trim().isNotEmpty() ? tableName.trim() : juce::String ("My Morph"));
     result = getDestinationFolder (wtm::Destination::Library).getChildFile ("Dragged").getChildFile (name + ".wav");
-    return wtm::writeWavetableWav (result, getMorphFrames());
+    return wtm::writeWavetableWav (result, getPlayFrames());
 }
 
 //==============================================================================

@@ -263,6 +263,39 @@ int main (int argc, char** argv)
         check (vital::wavetableFingerprint (out, 0) != vital::wavetableFingerprint (host, 0), "change detection notices the new table");
     }
 
+    // Optional: real files (not in the repo) - argv[2] = real hosted Vital state, argv[3] = a .vitaltable using an audio file
+    if (argc > 2)
+    {
+        juce::MemoryBlock real;
+        juce::File (argv[2]).loadFileAsData (real);
+        std::vector<Cycle> shown; juce::String nm, note;
+        const auto rr = vital::renderWavetable (real, 0, shown, nm, note);
+        check (rr.wasOk() && shown.size() == 257, "REAL Vital state: osc 1 readable (" + nm + ") " + rr.getErrorMessage() + note);
+
+        MorphSettings ms; ms.numFrames = 256;
+        juce::MemoryBlock out;
+        const auto ir = vital::injectWavetable (real, buildMorph (sine, saw, ms), 1, "Real Test", out);
+        check (ir.wasOk(), "REAL Vital state: inject into osc 2 " + ir.getErrorMessage());
+        std::vector<int> pos; std::vector<Cycle> got; juce::String name;
+        check (vital::readWavetable (out, 1, pos, got, name).wasOk() && got.size() == 256 && name == "Real Test", "REAL: read back osc 2");
+        outDir.getChildFile ("real_out.bin").replaceWithData (out.getData(), out.getSize());
+    }
+    if (argc > 3)
+    {
+        const auto table = juce::File (argv[3]).loadFileAsString();
+        const auto patch = "{\"settings\":{\"wavetables\":[" + table + "]}}";
+        juce::MemoryBlock mb (patch.toRawUTF8(), patch.getNumBytesAsUTF8());
+        std::vector<Cycle> shown; juce::String nm, note;
+        const auto rr = vital::renderWavetable (mb, 0, shown, nm, note);
+        float pk = 0; for (auto& f : shown) pk = std::max (pk, peakOf (f));
+        check (rr.wasOk() && shown.size() == 257 && pk > 0.5f && maxDiff (shown[0], shown[256]) > 0.05f,
+               "REAL audio-file table renders, frames differ (" + note + ")");
+        outDir.getChildFile ("audio_table_frames.raw").replaceWithData (shown[0].data(), 0); // placeholder
+        juce::FileOutputStream fo (outDir.getChildFile ("audio_table_frames.f32"));
+        fo.setPosition (0); fo.truncate();
+        for (int i : { 0, 64, 128, 192, 256 }) fo.write (shown[(size_t) i].data(), kFrameSize * sizeof (float));
+    }
+
     std::cout << (failures == 0 ? "ALL TESTS PASSED" : juce::String (failures) + " FAILURES") << std::endl;
     return failures == 0 ? 0 : 1;
 }

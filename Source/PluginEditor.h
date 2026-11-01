@@ -10,6 +10,8 @@ public:
     SourcePanel (WavetableMorpherProcessor& p, int slotIndex, juce::Colour colour, const juce::String& title);
 
     void refresh();
+    /** Highlights where in this oscillator's table the synth is playing (negative = show the selected frame). */
+    void setPlayingPosition (float position);
     void paint (juce::Graphics& g) override;
     void resized() override;
 
@@ -30,7 +32,11 @@ private:
     juce::TextButton prevButton, nextButton;
     juce::Slider frameSlider;
     wtm::WaveformView waveform;
+    wtm::WavetableView tableView;   // whole imported wavetable, in 3D
+    int numFrames = 1;
+    bool showingTable = false;
     std::unique_ptr<juce::FileChooser> chooser;
+    void selectFrame (int frame);
 };
 
 /** Floating window that shows the loaded synth's own interface (Vital, Serum 2...). */
@@ -136,7 +142,12 @@ private:
     bool loadingSynth = false;
 
     // What the big view shows: your morph, or the synth's oscillator 1
-    juce::TextButton showMorphButton { "Your morph" }, showSynthButton { "Synth Osc 1" };
+    juce::Label playingLabel;
+    juce::TextButton playAButton { "Osc A" }, playMorphButton { "Morph" }, playBButton { "Osc B" };
+    juce::TextButton showSynthButton { "Synth Osc 1" };
+    juce::Slider frameScrub;
+    int viewFrameCount = 1;
+    void choosePlaySource (WavetableMorpherProcessor::PlaySource);
     juce::TextButton useAsAButton { "Use as A" }, useAsBButton { "Use as B" };
     bool showingSynth = false;
     float synthViewPosition = 0.0f;

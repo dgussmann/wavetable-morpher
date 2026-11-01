@@ -68,9 +68,10 @@ namespace wtm::vital
             the JSON exactly, only fixing "bytes remaining" size fields in the header. */
         bool findJson (const char* p, size_t n, size_t& start, size_t& end)
         {
+            // The JSON starts at '{"'. (A lone '{' can appear by chance inside a binary size field.)
             size_t i = 0;
-            while (i < n && p[i] != '{') ++i;
-            if (i == n) return false;
+            while (i + 1 < n && ! (p[i] == '{' && (p[i + 1] == '"' || p[i + 1] == '}'))) ++i;
+            if (i + 1 >= n) return false;
 
             start = i;
             int depth = 0;
@@ -169,6 +170,19 @@ namespace wtm::vital
         }
 
         //==============================================================================
+        /** Vital names component types in patches; older files store a number instead. */
+        juce::String componentType (const juce::var& c)
+        {
+            const auto& t = c["type"];
+            if (t.isString())
+                return t.toString();
+
+            static const char* names[] = { "Wave Source", "Line Source", "Audio File Source", "Phase Shift", "Wave Window",
+                                           "Frequency Filter", "Slew Limiter", "Wave Folder", "Wave Warp" };
+            const int i = (int) t;
+            return juce::isPositiveAndBelow (i, (int) std::size (names)) ? juce::String (names[i]) : juce::String (i);
+        }
+
         juce::Array<juce::var>* wavetablesOf (const juce::var& root)
         {
             const auto& settings = root["settings"];
@@ -183,7 +197,7 @@ namespace wtm::vital
                     for (auto& g : *groups)
                         if (auto* comps = g["components"].getArray())
                             for (auto& c : *comps)
-                                if (c["type"].toString() == "Wave Source" && c["keyframes"].isArray() && c["keyframes"].size() > 0)
+                                if (componentType (c) == "Wave Source" && c["keyframes"].isArray() && c["keyframes"].size() > 0)
                                 {
                                     group = g;
                                     component = c;
@@ -198,6 +212,63 @@ namespace wtm::vital
                 if (search (t))
                     return true;
             return false;
+        }
+
+        /** Audio-file wavetables: a recording (16-bit samples) plus, per keyframe, where in it the
+            single-cycle window starts. Each Vital position gets its window, stretched to 2048 samples. */
+        void renderAudioFileSource (const juce::var& c, std::vector<std::pair<int, Cycle>>& keys)
+        {
+            juce::MemoryOutputStream raw;
+            if (! juce::Base64::convertFromBase64 (raw, c["audio_file"].toString()) || raw.getDataSize() < 4)
+                return;
+
+            const auto numSamples = (int) (raw.getDataSize() / 2);
+            const auto* pcm = static_cast<const juce::int16*> (raw.getData());
+
+            std::vector<std::pair<int, std::pair<double, double>>> marks; // position -> (start, window)
+            const double componentWindow = c.hasProperty ("window_size") ? (double) c["window_size"] : 2048.0;
+            if (auto* kfs = c["keyframes"].getArray())
+                for (auto& kf : *kfs)
+                {
+                    const double window = componentWindow > 1.0 ? componentWindow
+                                                                : (kf.hasProperty ("window_size") ? (double) kf["window_size"] : 2048.0);
+                    marks.push_back ({ juce::jlimit (0, kVitalFramePositions - 1, (int) kf["position"]),
+                                       { (double) kf["start_position"], std::max (2.0, window) } });
+                }
+
+            if (marks.empty())
+                return;
+            std::sort (marks.begin(), marks.end(), [] (const auto& a, const auto& b) { return a.first < b.first; });
+
+            auto sampleAt = [&] (double pos)
+            {
+                pos = juce::jlimit (0.0, (double) numSamples - 1.001, pos);
+                const int i = (int) pos;
+                const auto f = (float) (pos - i);
+                const float a = (float) pcm[i] / 32768.0f, b = (float) pcm[i + 1] / 32768.0f; // little-endian int16
+                return a + f * (b - a);
+            };
+
+            size_t k = 0;
+            for (int p = 0; p < kVitalFramePositions; ++p)
+            {
+                while (k + 1 < marks.size() && marks[k + 1].first <= p)
+                    ++k;
+
+                double start = marks[k].second.first, window = marks[k].second.second;
+                if (p > marks[k].first && k + 1 < marks.size())
+                {
+                    const double t = (double) (p - marks[k].first) / std::max (1, marks[k + 1].first - marks[k].first);
+                    start  += t * (marks[k + 1].second.first - start);
+                    window += t * (marks[k + 1].second.second - window);
+                }
+
+                Cycle cyc ((size_t) kFrameSize);
+                for (int i = 0; i < kFrameSize; ++i)
+                    cyc[(size_t) i] = sampleAt (start + window * (double) i / (double) kFrameSize);
+                removeDC (cyc);
+                keys.emplace_back (p, std::move (cyc));
+            }
         }
 
         juce::String encodeFrame (const Cycle& c)
@@ -343,22 +414,28 @@ namespace wtm::vital
 
                 for (auto& c : *comps)
                 {
-                    const auto type = c["type"].toString();
-                    if (type != "Wave Source")
+                    const auto type = componentType (c);
+                    std::vector<std::pair<int, Cycle>> keys;
+
+                    if (type == "Wave Source")
+                    {
+                        if (auto* kfs = c["keyframes"].getArray())
+                            for (auto& kf : *kfs)
+                            {
+                                Cycle cyc;
+                                if (decodeFrame (kf["wave_data"].toString(), cyc))
+                                    keys.emplace_back (juce::jlimit (0, kVitalFramePositions - 1, (int) kf["position"]), std::move (cyc));
+                            }
+                    }
+                    else if (type == "Audio File Source")
+                    {
+                        renderAudioFileSource (c, keys);
+                    }
+                    else
                     {
                         skipped.addIfNotAlreadyThere (type);
                         continue;
                     }
-
-                    // Keyframes sorted by position, linear blend between them (Vital's default look).
-                    std::vector<std::pair<int, Cycle>> keys;
-                    if (auto* kfs = c["keyframes"].getArray())
-                        for (auto& kf : *kfs)
-                        {
-                            Cycle cyc;
-                            if (decodeFrame (kf["wave_data"].toString(), cyc))
-                                keys.emplace_back (juce::jlimit (0, kVitalFramePositions - 1, (int) kf["position"]), std::move (cyc));
-                        }
 
                     if (keys.empty())
                         continue;
