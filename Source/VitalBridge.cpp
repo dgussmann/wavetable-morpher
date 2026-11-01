@@ -425,6 +425,17 @@ namespace wtm::vital
         return juce::Result::ok();
     }
 
+    juce::String tableAuthor (const juce::MemoryBlock& state, int osc)
+    {
+        ParsedState parsed;
+        if (parseState (state, parsed).failed())
+            return {};
+        auto* tables = wavetablesOf (parsed.root);
+        if (tables == nullptr || ! juce::isPositiveAndBelow (osc, tables->size()))
+            return {};
+        return tables->getReference (osc)["author"].toString();
+    }
+
     juce::int64 wavetableFingerprint (const juce::MemoryBlock& state, int osc)
     {
         HostEnvelope env;

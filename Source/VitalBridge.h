@@ -34,6 +34,9 @@ namespace wtm::vital
     juce::Result renderWavetable (const juce::MemoryBlock& state, int oscillatorIndex,
                                   std::vector<Cycle>& frames, juce::String& name, juce::String& note);
 
+    /** The "author" of an oscillator's wavetable ("Wavetable Morpher" when it's one we sent). */
+    juce::String tableAuthor (const juce::MemoryBlock& state, int oscillatorIndex);
+
     /** A fingerprint of the patch's wavetable section, to cheaply detect changes. */
     juce::int64 wavetableFingerprint (const juce::MemoryBlock& state, int oscillatorIndex);
 

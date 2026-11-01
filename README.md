@@ -4,7 +4,7 @@ A VST3 / AU instrument (plus standalone app) for Apple Silicon Macs that builds 
 
 1. **Pick two oscillators**: built-in shapes, an imported WAV/AIFF/FLAC (single cycle or a whole wavetable, with a frame picker), or draw your own with the mouse.
 2. **Morph** A into B across 8–256 frames: *Crossfade* (blend samples) or *Spectral* (blend each harmonic, smoother), with Linear / Ease / Exponential / Logarithmic curves.
-3. **Preview** on the built-in 8-voice wavetable synth: play the on-screen keyboard or MIDI, sweep the Position knob, or turn up Scan Depth to hear the whole table move. Drag across the 3D view to scan.
+3. **Play it in Serum 2 or Vital**, loaded inside the plugin (Serum 2 loads automatically). Choose what plays - Oscillator A's table, the Morph, or Oscillator B's table - and it is put into the synth's oscillator automatically (Solo mutes the synth's other oscillators). The frame slider moves the synth's wavetable position. Loading a synth preset keeps your table in place.
 4. **Name and save**: every save goes to `~/Music/Wavetable Morpher`, and optionally straight into **Serum 2**, **Vital** and **Massive XL** wavetable folders (auto-detected; change them under *Folders*).
 
 Exported files are 32-bit float mono WAVs, 2048 samples per frame, with the `clm` frame-size marker Serum and Vital read. Massive XL slices any audio into 2048-sample frames, so the same file works there.

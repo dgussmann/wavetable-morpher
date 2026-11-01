@@ -490,17 +490,7 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
     addChildComponent (useAsAButton);
     addChildComponent (useAsBButton);
 
-    previewTitle.setText ("Preview", juce::dontSendNotification);
-    styleLabel (previewTitle, 15.0f, Colours::accent, true);
-    addAndMakeVisible (previewTitle);
-
-    const std::pair<const char*, const char*> knobDefs[] = {
-        { ParamIDs::position, "Position" }, { ParamIDs::scanDepth, "Scan Depth" }, { ParamIDs::scanRate, "Scan Rate" },
-        { ParamIDs::attack, "Attack" },     { ParamIDs::decay, "Decay" },          { ParamIDs::sustain, "Sustain" },
-        { ParamIDs::release, "Release" },   { ParamIDs::volume, "Volume" },
-    };
-    for (const auto& [id, name] : knobDefs)
-        addAndMakeVisible (knobs.add (new LabelledKnob (proc.apvts, id, name)));
+    // (No built-in synth: the wavetable always plays through Serum 2, Vital or another loaded synth.)
 
     // Play-through synth ---------------------------------------------------
     playWithLabel.setText ("Play with", juce::dontSendNotification);
@@ -561,14 +551,36 @@ WavetableMorpherEditor::WavetableMorpherEditor (WavetableMorpherProcessor& p)
 
     styleLabel (statusLabel, 13.0f, Colours::dimText);
     addAndMakeVisible (statusLabel);
-    setStatus ("Pick two waveforms, play the keyboard to hear them, then name and save your wavetable.");
+    setStatus ("Pick two waveforms, choose what plays (Osc A, Morph or Osc B), and play the keyboard.");
 
     proc.addChangeListener (this);
     tableView.setFrames (proc.getMorphFrames());
 
+    refreshAll(); // show the current state straight away (play source, synth controls, slider readout)
+
+    // Nothing to play through yet (a fresh instance)? Load Serum 2 - or Vital - straight away.
+    if (proc.getHostedSynth() == nullptr && ! proc.isRestoringSynth() && ! synthFiles.isEmpty())
+    {
+        int pick = 0;
+        for (int i = 0; i < synthFiles.size(); ++i)
+            if (synthFiles.getReference (i).getFileNameWithoutExtension().startsWithIgnoreCase ("Serum 2")) { pick = i; break; }
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<WavetableMorpherEditor> (this), pick]
+        {
+            if (safe != nullptr && safe->proc.getHostedSynth() == nullptr && ! safe->proc.isRestoringSynth())
+            {
+                safe->synthBox.setSelectedId (100 + pick, juce::dontSendNotification);
+                safe->synthChosen();
+            }
+        });
+    }
+    else if (proc.getHostedSynth() == nullptr)
+    {
+        setStatus ("Choose a synth in \"Play with\" (Serum 2 or Vital) to hear your wavetable.");
+    }
+
     setResizable (true, true);
-    setResizeLimits (940, 760, 1600, 1150);
-    setSize (1020, 800);
+    setResizeLimits (940, 680, 1600, 1150);
+    setSize (1020, 720);
     startTimerHz (30);
 }
 
@@ -654,9 +666,7 @@ void WavetableMorpherEditor::resized()
 
     r.removeFromTop (12);
 
-    // Wavetable view + synth row + preview knobs
-    auto knobArea = r.removeFromBottom (92);
-    r.removeFromBottom (6);
+    // Wavetable view + synth row
     auto synthRow = r.removeFromBottom (28);
     playWithLabel.setBounds (synthRow.removeFromLeft (62));
     synthBox.setBounds (synthRow.removeFromLeft (190));
@@ -671,10 +681,6 @@ void WavetableMorpherEditor::resized()
     synthRow.removeFromLeft (8);
     autoSendToggle.setBounds (synthRow.removeFromLeft (92));
     soloToggle.setBounds (synthRow.removeFromLeft (64));
-    previewTitle.setBounds (knobArea.removeFromLeft (80).withTrimmedTop (8));
-    const int kw = knobArea.getWidth() / std::max (1, knobs.size());
-    for (auto* k : knobs)
-        k->setBounds (knobArea.removeFromLeft (kw).reduced (4, 0));
 
     r.removeFromBottom (8);
     frameScrub.setBounds (r.removeFromBottom (24));
@@ -721,8 +727,7 @@ void WavetableMorpherEditor::populateSynthMenu()
 {
     synthFiles = proc.findSynthPlugins();
     synthBox.clear (juce::dontSendNotification);
-    synthBox.addItem ("Built-in preview synth", 1);
-    synthBox.addSeparator();
+    synthBox.setTextWhenNothingSelected ("Choose a synth...");
 
     for (int i = 0; i < synthFiles.size(); ++i)
         synthBox.addItem (synthFiles.getReference (i).getFileNameWithoutExtension(), 100 + i);
@@ -743,7 +748,7 @@ void WavetableMorpherEditor::refreshSynthControls()
 
     if (! loadingSynth)
     {
-        int id = 1;
+        int id = 0;
         if (hosted)
         {
             const int index = synthFiles.indexOf (file);
@@ -756,7 +761,8 @@ void WavetableMorpherEditor::refreshSynthControls()
                 id = 100 + synthFiles.size() - 1;
             }
         }
-        synthBox.setSelectedId (id, juce::dontSendNotification);
+        if (id > 0) synthBox.setSelectedId (id, juce::dontSendNotification);
+        else        synthBox.setSelectedId (0, juce::dontSendNotification);
     }
 
     openSynthButton.setEnabled (hosted);
@@ -770,11 +776,6 @@ void WavetableMorpherEditor::refreshSynthControls()
     soloToggle.setToggleState (proc.getSolo(), juce::dontSendNotification);
     autoSendToggle.setToggleState (proc.getAutoSend(), juce::dontSendNotification);
     sendButton.setButtonText (vital && proc.isVitalUpToDate() ? juce::String::fromUTF8 ("Sent \xe2\x9c\x93") : "Send to " + proc.getHostedShortName());
-
-    // The built-in synth's knobs do nothing while a real synth is playing.
-    for (auto* k : knobs)
-        k->setEnabled (! hosted);
-    previewTitle.setText (hosted ? "Built-in" : "Preview", juce::dontSendNotification);
 }
 
 void WavetableMorpherEditor::synthChosen()
@@ -788,13 +789,8 @@ void WavetableMorpherEditor::synthChosen()
         return;
     }
 
-    if (id == 1)
-    {
-        proc.unloadHostedSynth();
-        setStatus ("Using the built-in preview synth.");
-        refreshSynthControls();
+    if (id <= 0)
         return;
-    }
 
     const int index = id - 100;
     if (! juce::isPositiveAndBelow (index, synthFiles.size()))

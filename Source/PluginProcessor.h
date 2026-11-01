@@ -133,6 +133,7 @@ public:
     void unloadHostedSynth();
 
     juce::AudioPluginInstance* getHostedSynth() const noexcept { return hosted.get(); }
+    bool isRestoringSynth() const noexcept { return restoringSynth || loadingHosted; }
     juce::File getHostedSynthFile() const { return hostedFile; }
     juce::String getHostedSynthName() const { return hosted != nullptr ? hosted->getName() : juce::String(); }
     bool isHostedVital() const noexcept { return hostedIsVital; }
@@ -227,6 +228,7 @@ private:
     juce::File hostedFile;
     bool hostedIsVital = false, hostedIsSerum = false;
     bool solo = true;
+    bool restoringSynth = false, loadingHosted = false;
     int serumSendCounter = 0;
     juce::Result sendToVitalNow (const std::vector<wtm::Cycle>& frames);
     juce::Result sendToSerumNow (const std::vector<wtm::Cycle>& frames);

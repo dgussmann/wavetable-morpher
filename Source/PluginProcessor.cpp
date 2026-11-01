@@ -233,7 +233,8 @@ void WavetableMorpherProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
         return;
     }
 
-    synth.renderNextBlock (buffer, midi, 0, numSamples);
+    // No synth loaded yet: silence (there is no built-in synth any more).
+    midi.clear();
 
     lastPosition = position;
     displayPosition.store (position);
@@ -259,7 +260,7 @@ void WavetableMorpherProcessor::timerCallback()
         requestRebuild();
 
     // Watch the synth's oscillator 1 (picks up wavetables you choose inside Vital).
-    if (hosted != nullptr && ++pollCounter >= 12)
+    if (hosted != nullptr && ++pollCounter >= 6)
     {
         pollCounter = 0;
         pollSynthTable();
@@ -655,12 +656,14 @@ void WavetableMorpherProcessor::setStateInformation (const void* data, int sizeI
         hostedState.fromBase64Encoding (host.getProperty ("state", "").toString());
 
         // Plugin loading must happen on the message thread.
+        restoringSynth = path.isNotEmpty();
         juce::WeakReference<WavetableMorpherProcessor> weak (this);
         juce::MessageManager::callAsync ([weak, path, hostedState]
         {
             auto* self = weak.get();
             if (self == nullptr)
                 return;
+            self->restoringSynth = false;
 
             if (path.isEmpty() || ! juce::File::isAbsolutePath (path) || ! juce::File (path).exists())
             {
@@ -724,8 +727,8 @@ juce::Array<juce::File> WavetableMorpherProcessor::findSynthPlugins() const
         static int rank (const juce::File& f)
         {
             const auto n = f.getFileNameWithoutExtension().toLowerCase();
-            if (n.startsWith ("vital")) return 0;
-            if (n.startsWith ("serum 2") || n.startsWith ("serum2")) return 1;
+            if (n.startsWith ("serum 2") || n.startsWith ("serum2")) return 0;
+            if (n.startsWith ("vital")) return 1;
             if (n.startsWith ("serum")) return 2;
             return 3;
         }
@@ -755,6 +758,7 @@ void WavetableMorpherProcessor::loadHostedSynth (const juce::File& bundle, std::
 
     if (chosen == nullptr)
     {
+        loadingHosted = false;
         if (done) done (juce::Result::fail (types.isEmpty() ? "Couldn't open " + bundle.getFileNameWithoutExtension() + "."
                                                             : bundle.getFileNameWithoutExtension() + " isn't an instrument."));
         return;
@@ -762,6 +766,7 @@ void WavetableMorpherProcessor::loadHostedSynth (const juce::File& bundle, std::
 
     const auto description = *chosen;
     const int generation = ++loadGeneration;
+    loadingHosted = true;
     std::shared_ptr<juce::MemoryBlock> restore = stateToRestore != nullptr ? std::make_shared<juce::MemoryBlock> (*stateToRestore) : nullptr;
     juce::WeakReference<WavetableMorpherProcessor> weak (this);
 
@@ -772,6 +777,7 @@ void WavetableMorpherProcessor::loadHostedSynth (const juce::File& bundle, std::
             if (self == nullptr || generation != self->loadGeneration)
                 return; // processor gone, or the user picked something else meanwhile
 
+            self->loadingHosted = false;
             if (instance == nullptr)
             {
                 if (done) done (juce::Result::fail ("Couldn't load " + description.name + ": " + error));
@@ -977,10 +983,16 @@ void WavetableMorpherProcessor::pollSynthTable (bool force)
     {
         juce::String path; int samples = 0;
         const auto r = wtm::serum::getOscillatorWavetable (state, 0, path, samples);
-        const auto fingerprint = (path + "|" + juce::String (samples)).hashCode64();
+        juce::String targetPath; int targetSamples = 0;
+        wtm::serum::getOscillatorWavetable (state, vitalOsc, targetPath, targetSamples);
+        const auto fingerprint = (path + "|" + juce::String (samples) + "|" + targetPath).hashCode64();
         if (! force && fingerprint == synthFingerprint)
             return;
         synthFingerprint = fingerprint;
+
+        // A Serum preset was loaded (or a table picked) over ours: put ours back, with Solo, when auto-sending.
+        if (! force && autoSend && targetPath.isNotEmpty() && ! targetPath.trimCharactersAtStart ("/").startsWith ("Wavetable Morpher/Live/"))
+            lastSentVersion = -1;
 
         synthTable.clear();
         synthTableName = path.fromLastOccurrenceOf ("/", false, false).upToLastOccurrenceOf (".", false, false);
@@ -1008,6 +1020,10 @@ void WavetableMorpherProcessor::pollSynthTable (bool force)
     if (! force && fingerprint == synthFingerprint)
         return;
     synthFingerprint = fingerprint;
+
+    // A Vital preset was loaded over our table: put ours back (with Solo) when auto-sending.
+    if (! force && autoSend && wtm::vital::tableAuthor (state, vitalOsc) != "Wavetable Morpher")
+        lastSentVersion = -1;
 
     std::vector<wtm::Cycle> frames;
     juce::String name, note;
