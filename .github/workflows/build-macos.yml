@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15   # Apple Silicon runner
@@ -53,3 +56,14 @@ jobs:
           name: Wavetable-Morpher-macOS-arm64
           path: dist/Wavetable-Morpher-macOS-arm64.zip
           retention-days: 90
+
+      - name: Publish as the "latest" release (one-click download)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest dist/Wavetable-Morpher-macOS-arm64.zip \
+            --title "Wavetable Morpher (latest build)" \
+            --notes "Apple Silicon build of commit ${GITHUB_SHA::7}. Download the zip, unzip it, then see HOW-TO-INSTALL.txt inside." \
+            --target "$GITHUB_SHA"
